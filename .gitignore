@@ -1,0 +1,29 @@
+# Zig build artifacts
+zig-out/
+zig-cache/
+bin/
+
+# Compiled objects and libraries
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+
+# IDE/editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and env
+*.log
+.env
+
+# Temp
+*.tmp
