@@ -1,6 +1,7 @@
 // ┌──────────────────────────────────────────────────────────────────────────────┐
 // │                                                                              │
-// │              第四部分：response - 响应解析（把字节流变成结构化数据）             │
+// │              第四部分：response - 响应解析（把字节流变成结构化数据）            │
+// |                    每类功能玛的响应结构是有差异的                              │
 // │                                                                              │
 // └──────────────────────────────────────────────────────────────────────────────┘
 const std = @import("std");
@@ -94,7 +95,7 @@ const ParseError = error{
 ///   2. 检查最高位 → 如果是 1，说明是异常响应
 ///   3. 否则根据功能码类型，用不同方式解析后续数据
 fn parsePdu(data: []u8) ParseError!ResponseData {
-    if (data.len < 1) return error.FrameTooShort; // 至少要有功能码
+    if (data.len < 2) return error.FrameTooShort; // 至少要有功能码 + 1字节数据（异常码/字节计数等）
 
     const fc_code = data[0]; // PDU的第一个字节为功能码
 
@@ -104,7 +105,6 @@ fn parsePdu(data: []u8) ParseError!ResponseData {
     //   0x03 = 0b00000011，& 0x80 = 0b00000000 = 0 → 正常
     //   0x83 = 0b10000011，& 0x80 = 0b10000000 ≠ 0 → 异常！
     if (fc_code & 0x80 != 0) {
-        if (data.len < 2) return ParseError.FrameTooShort; // 异常响应至少要有功能码和异常码
         return .{
             .exception = .{
                 .function_code = fc_code & 0x7F, // 去掉最高位，恢复原始功能码
@@ -118,6 +118,15 @@ fn parsePdu(data: []u8) ParseError!ResponseData {
 
     switch (fc_enum) {
         // ---- 0x03 / 0x04：读寄存器响应 ----
-        .read_holding_registers, .read_input_registers => {},
+        .read_holding_registers, .read_input_registers => {
+            const b_count = data[1]; // 字节计数：后面有多少字节的寄存器数据
+            if (data.len < 2 + b_count) return error.FrameTooShort;
+            if (b_count % 2 != 0) return error.InvalidByteCount; // 寄存器数据必须是偶数个字节
+
+            var result = ReadRegistersResult{ .count = b_count / 2 }; // 寄存器数量 = 字节计数 / 2
+
+            // 解析寄存器数据，每 2 字节一个寄存器（大端序）
+            for (0..result.count) |i| {}
+        },
     }
 }
