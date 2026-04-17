@@ -39,7 +39,7 @@ const protocol = @import("protocol.zig");
 ///   quantity   - 要读的寄存器个数（1~125，Modbus 规范限制单次最多 125 个）
 ///
 /// 返回：buf 中有效数据的切片（5 字节）
-fn buildReadHoldingRegisters(buf: []u8, start_addr: u16, quantity: u16) []u8 {
+pub fn buildReadHoldingRegisters(buf: []u8, start_addr: u16, quantity: u16) []u8 {
     buf[0] = @intFromEnum(protocol.FunctionCode.read_holding_registers); // 功能码 0x03
     std.mem.writeInt(u16, buf[1..3], start_addr, .big);
     std.mem.writeInt(u16, buf[3..5], quantity, .big);
@@ -61,7 +61,7 @@ fn buildReadHoldingRegisters(buf: []u8, start_addr: u16, quantity: u16) []u8 {
 ///
 ///   注意：这里的 quantity 是线圈个数（按 bit 计），不是字节数。
 ///   比如读 16 个线圈，响应里会返回 2 字节（16 bit = 2 byte）。
-fn buildReadCoils(buf: []u8, start_addr: u16, quantity: u16) []u8 {
+pub fn buildReadCoils(buf: []u8, start_addr: u16, quantity: u16) []u8 {
     buf[0] = @intFromEnum(protocol.FunctionCode.read_coils); // 功能码 0x01
     std.mem.writeInt(u16, buf[1..3], start_addr, .big);
     std.mem.writeInt(u16, buf[3..5], quantity, .big);
@@ -69,7 +69,7 @@ fn buildReadCoils(buf: []u8, start_addr: u16, quantity: u16) []u8 {
 }
 
 /// ====================== 0x02 读离散输入│ ======================
-fn buildReadDiscreteInputs(buf: []u8, start_addr: u16, quantity: u16) []u8 {
+pub fn buildReadDiscreteInputs(buf: []u8, start_addr: u16, quantity: u16) []u8 {
     buf[0] = @intFromEnum(protocol.FunctionCode.read_discrete_inputs); // 功能码 0x02
     std.mem.writeInt(u16, buf[1..3], start_addr, .big);
     std.mem.writeInt(u16, buf[3..5], quantity, .big);
@@ -77,7 +77,7 @@ fn buildReadDiscreteInputs(buf: []u8, start_addr: u16, quantity: u16) []u8 {
 }
 
 /// ====================== 0x05 写单个线圈 ======================
-fn buildWriteSingleCoil(buf: []u8, addr: u16, value: u16) []u8 {
+pub fn buildWriteSingleCoil(buf: []u8, addr: u16, value: u16) []u8 {
     buf[0] = @intFromEnum(protocol.FunctionCode.write_single_coil);
     std.mem.writeInt(u16, buf, addr, .big);
     std.mem.writeInt(u16, buf[3..5], value, .big);
@@ -99,7 +99,7 @@ fn buildWriteSingleCoil(buf: []u8, addr: u16, value: u16) []u8 {
 ///     [0x06, 0x00, 0x01, 0x00, 0xFF]
 ///
 ///   响应：从站会原样回显这 5 字节（表示写入成功）
-fn buildWriteSingleRegister(buf: []u8, addr: u16, value: u16) []u8 {
+pub fn buildWriteSingleRegister(buf: []u8, addr: u16, value: u16) []u8 {
     buf[0] = @intFromEnum(protocol.FunctionCode.write_single_register); // 功能码 0x06
     std.mem.writeInt(u16, buf[1..3], addr, .big);
     std.mem.writeInt(u16, buf[3..5], value, .big);
@@ -126,7 +126,7 @@ fn buildWriteSingleRegister(buf: []u8, addr: u16, value: u16) []u8 {
 ///      └─功能码0x10               字节数4
 ///
 ///   响应：从站回显 起始地址 和 寄存器数量（5字节），表示写入成功
-fn buildWriteMultipleRegisters(buf: []u8, start_addr: u16, values: []const 16) []u8 {
+pub fn buildWriteMultipleRegisters(buf: []u8, start_addr: u16, values: []const u16) []u8 {
     // values.len 是 usize 类型，需要转换为 u16 和 u8
     const quantity: u16 = @intCast(values.len); // 寄存器数量
     const byte_count: u8 = @intCast(values.len * 2); // 字节计数

@@ -72,7 +72,7 @@ pub const MbapHeader = struct {
 ///   pdu_len - PDU 部分的长度（不含 MBAP 头部本身）
 ///   unit_id - 从站地址
 /// 不用指针直接转为 *const u16 去读写的原因就是（可能有对齐和字节序问题）
-fn writeMbapHeader(buf: []u8, tx_id: u16, pdu_len: u16, unit_id: u8) void {
+pub fn writeMbapHeader(buf: []u8, tx_id: u16, pdu_len: u16, unit_id: u8) void {
     // buf[0..2] 表示从 buf 中取第 0、1 两个字节的切片（Zig 切片是左闭右开的）
     // writeInt(u16, ..., .big) 把 u16 值按大端序写入 2 字节
     std.mem.writeInt(u16, buf[0..2], tx_id, .big);
@@ -85,7 +85,7 @@ fn writeMbapHeader(buf: []u8, tx_id: u16, pdu_len: u16, unit_id: u8) void {
 /// 如果数据不足 7 字节，返回 null（表示"还没收完整"）
 ///
 /// 返回类型 ?MbapHeader 是 Zig 的可选类型（Optional），等价于"可能有值，也可能是 null"
-fn parseMbapHeader(data: []const u8) ?MbapHeader {
+pub fn parseMbapHeader(data: []const u8) ?MbapHeader {
     if (data.len < MBAP_HEADER_SIZE) return null; // 数据不足 7 字节，无法解析完整 MBAP 头部
     return MbapHeader{
         .transaction_id = std.mem.readInt(u16, data[0..2], .big),
