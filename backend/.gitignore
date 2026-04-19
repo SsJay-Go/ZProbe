@@ -1,0 +1,53 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Node / frontend
+node_modules/
+dist/
+build/
+public/
+bun.lockb
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+.env
+.env.*.local
+
+# Bun / Vite caches
+.bun/
+.vite/
+.viteconfig.local
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# IDEs
+.vscode/
+.idea/
+*.iml
+
+# Zig build artifacts
+zig-cache/
+zig-out/
+*.zig.cache
+
+# Compiled objects
+*.o
+*.obj
+*.exe
+*.dll
+*.pdb
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Misc
+coverage/
+.DS_Store
+
+
