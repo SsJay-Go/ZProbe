@@ -1,12 +1,14 @@
 <script setup>
 import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { ElMessage } from 'element-plus'
 import {
   ArrowDown, Monitor, Connection, Setting, DataLine, Document,
   Edit, View, Tools, QuestionFilled, Link, Refresh, Search,
   Histogram, List, Warning, Cpu,
 } from '@element-plus/icons-vue'
 import RegisterView from '../views/RegisterView.vue'
+import TcpConnectionDialog from '../components/connection/TcpConnectionDialog.vue'
 
 const { t, locale } = useI18n()
 
@@ -17,6 +19,11 @@ function switchLang(lang) {
 
 const activeTab = ref('connection')
 const activeSubTab = ref('new-tcp')
+const tcpDialogVisible = ref(false)
+const connectionState = ref({
+  connected: false,
+  name: '',
+})
 
 const tabs = computed(() => [
   {
@@ -103,6 +110,11 @@ function handleTabCommand(command) {
   const [tab, sub] = command.split('/')
   activeTab.value = tab
   activeSubTab.value = sub
+
+  // 只在用户点击“连接 -> 新建 TCP 连接”菜单项时弹出参数窗口。
+  if (tab === 'connection' && sub === 'new-tcp') {
+    tcpDialogVisible.value = true
+  }
 }
 
 function handleTabClick(tab) {
@@ -118,6 +130,15 @@ const currentSubLabel = computed(() => {
   const child = tab.children.find(c => c.name === activeSubTab.value)
   return child?.label || ''
 })
+
+function handleTcpConnected(payload) {
+  // 这里仅维护 UI 状态；连接真实生命周期以后可迁移到 Pinia 统一管理。
+  connectionState.value = {
+    connected: true,
+    name: payload?.connection?.name || 'TCP',
+  }
+  ElMessage.success(`已连接: ${connectionState.value.name}`)
+}
 </script>
 
 <template>
@@ -142,10 +163,10 @@ const currentSubLabel = computed(() => {
         >
           <button
             @click="handleTabClick(tab)"
-            class="nav-btn flex items-center gap-1.5 px-3 py-1.5 rounded-md text-[13px] transition-all whitespace-nowrap cursor-pointer border-none outline-none relative"
+            class="app-nav-button"
             :class="activeTab === tab.name
-              ? 'bg-blue-50 text-blue-600 font-medium shadow-xs'
-              : 'bg-transparent text-gray-500 hover:bg-gray-100/80 hover:text-gray-700'"
+              ? 'app-nav-button-active'
+              : 'app-nav-button-idle'"
           >
             <el-icon :size="15"><component :is="tab.icon" /></el-icon>
             {{ tab.label }}
@@ -153,10 +174,11 @@ const currentSubLabel = computed(() => {
           </button>
           <template #dropdown>
             <el-dropdown-menu class="nav-dropdown">
-              <template v-for="(child, idx) in tab.children" :key="idx">
-                <div v-if="child.divider" class="mx-2 my-1.5 border-t border-gray-100" />
+              <template v-for="(child, idx) in tab.children">
+                <div v-if="child.divider" :key="`divider-${idx}`" class="mx-2 my-1.5 border-t border-gray-100" />
                 <el-dropdown-item
                   v-else
+                  :key="`item-${idx}`"
                   :command="`${tab.name}/${child.name}`"
                   class="nav-dropdown-item"
                   :class="{ 'is-selected': activeTab === tab.name && activeSubTab === child.name }"
@@ -171,7 +193,7 @@ const currentSubLabel = computed(() => {
 
       <div class="flex items-center gap-2 ml-3 shrink-0">
         <el-dropdown trigger="click" @command="switchLang" placement="bottom-end">
-          <button class="flex items-center gap-1 px-2 py-1 rounded text-xs text-gray-500 hover:bg-gray-100 cursor-pointer border-none outline-none bg-transparent transition-colors">
+          <button class="app-nav-plain-button">
             {{ locale === 'zh' ? '中' : 'En' }}
             <el-icon :size="10"><ArrowDown /></el-icon>
           </button>
@@ -182,7 +204,14 @@ const currentSubLabel = computed(() => {
             </el-dropdown-menu>
           </template>
         </el-dropdown>
-        <el-tag type="danger" size="small" effect="dark" round>{{ $t('app.disconnected') }}</el-tag>
+        <el-tag
+          :type="connectionState.connected ? 'success' : 'danger'"
+          size="small"
+          effect="dark"
+          round
+        >
+          {{ connectionState.connected ? $t('app.connected') : $t('app.disconnected') }}
+        </el-tag>
       </div>
     </div>
 
@@ -190,58 +219,10 @@ const currentSubLabel = computed(() => {
     <el-main class="bg-gray-50 p-0! overflow-hidden">
       <RegisterView />
     </el-main>
+
+    <TcpConnectionDialog
+      v-model="tcpDialogVisible"
+      @connected="handleTcpConnected"
+    />
   </el-container>
 </template>
-
-<style scoped>
-/* 导航按钮过渡 */
-.nav-btn {
-  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-}
-.nav-btn:active {
-  transform: scale(0.97);
-}
-</style>
-
-<style>
-/* 下拉菜单全局样式覆盖 */
-.nav-dropdown.el-dropdown-menu {
-  padding: 6px;
-  border-radius: 10px;
-  border: 1px solid #e5e7eb;
-  box-shadow: 0 8px 24px -4px rgba(0, 0, 0, 0.08), 0 2px 8px -2px rgba(0, 0, 0, 0.04);
-  min-width: 180px;
-}
-
-.nav-dropdown-item.el-dropdown-menu__item {
-  padding: 8px 12px;
-  border-radius: 6px;
-  font-size: 13px;
-  color: #4b5563;
-  line-height: 1.5;
-  transition: all 0.15s ease;
-  margin: 1px 0;
-}
-
-.nav-dropdown-item.el-dropdown-menu__item:hover {
-  background: #f0f7ff;
-  color: #2563eb;
-}
-
-.nav-dropdown-item.el-dropdown-menu__item.is-selected {
-  background: #eff6ff;
-  color: #2563eb;
-  font-weight: 500;
-}
-
-.nav-dropdown-item.el-dropdown-menu__item.is-selected::before {
-  content: '';
-  display: inline-block;
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #2563eb;
-  margin-right: 6px;
-  vertical-align: middle;
-}
-</style>

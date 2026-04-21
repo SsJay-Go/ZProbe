@@ -1,155 +1,104 @@
 const std = @import("std");
 
-// Although this function looks imperative, it does not perform the build
-// directly and instead it mutates the build graph (`b`) that will be then
-// executed by an external runner. The functions in `std.Build` implement a DSL
-// for defining build steps and express dependencies between them, allowing the
-// build runner to parallelize the build automatically (and the cache system to
-// know when a step doesn't need to be re-run).
+// 这个函数本身不会立刻执行构建，而是负责描述并修改 Zig 的构建图。
+// 真正执行时由外部 runner 按依赖关系调度，因此这里更像是在声明“如何构建”。
 pub fn build(b: *std.Build) void {
-    // Standard target options allow the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
+    // 标准目标选项：允许执行 `zig build` 的人自行指定目标平台。
+    // 这里保持默认行为，即默认构建本机平台，也允许显式切换目标。
     const target = b.standardTargetOptions(.{});
-    // Standard optimization options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
-    // set a preferred release mode, allowing the user to decide how to optimize.
+    // 标准优化选项：支持 Debug、ReleaseSafe、ReleaseFast、ReleaseSmall 等模式。
+    // 当前不强行指定优化级别，交给调用方按场景选择。
     const optimize = b.standardOptimizeOption(.{});
-    // It's also possible to define more custom flags to toggle optional features
-    // of this build script using `b.option()`. All defined flags (including
-    // target and optimize options) will be listed when running `zig build --help`
-    // in this directory.
+    // 如有需要，也可以通过 `b.option()` 给这个构建脚本追加自定义开关。
+    // 这些开关会和 target / optimize 一起出现在 `zig build --help` 中。
 
-    // This creates a module, which represents a collection of source files alongside
-    // some compilation options, such as optimization mode and linked system libraries.
-    // Zig modules are the preferred way of making Zig code available to consumers.
-    // addModule defines a module that we intend to make available for importing
-    // to our consumers. We must give it a name because a Zig package can expose
-    // multiple modules and consumers will need to be able to specify which
-    // module they want to access.
-    const mod = b.addModule("backend", .{
-        // The root source file is the "entry point" of this module. Users of
-        // this module will only be able to access public declarations contained
-        // in this file, which means that if you have declarations that you
-        // intend to expose to consumers that were defined in other files part
-        // of this module, you will have to make sure to re-export them from
-        // the root file.
-        .root_source_file = b.path("src/root.zig"),
-        // Later on we'll use this module as the root module of a test executable
-        // which requires us to specify a target.
+    // 先把 httpz 依赖接入构建图，再导出为可导入模块。
+    // 这样业务源码里的 `@import("httpz")` 才能在编译时被解析到。
+    const httpz_dep = b.dependency("httpz", .{
         .target = target,
+        .optimize = optimize,
+    });
+    const httpz_mod = httpz_dep.module("httpz");
+
+    // backend 模块承载共享业务代码，供测试和可执行程序共同复用。
+    const mod = b.addModule("backend", .{
+        // 模块根文件相当于对外暴露 API 的入口。
+        // 如果其他文件里有想公开的声明，需要在 root.zig 中重新导出。
+        .root_source_file = b.path("src/root.zig"),
+        // 因为后面会把它作为测试目标的根模块，所以这里要明确挂上 target。
+        .target = target,
+        .imports = &.{
+            .{ .name = "httpz", .module = httpz_mod },
+        },
     });
 
-    // Here we define an executable. An executable needs to have a root module
-    // which needs to expose a `main` function. While we could add a main function
-    // to the module defined above, it's sometimes preferable to split business
-    // logic and the CLI into two separate modules.
-    //
-    // If your goal is to create a Zig library for others to use, consider if
-    // it might benefit from also exposing a CLI tool. A parser library for a
-    // data serialization format could also bundle a CLI syntax checker, for example.
-    //
-    // If instead your goal is to create an executable, consider if users might
-    // be interested in also being able to embed the core functionality of your
-    // program in their own executable in order to avoid the overhead involved in
-    // subprocessing your CLI tool.
-    //
-    // If neither case applies to you, feel free to delete the declaration you
-    // don't need and to put everything under a single module.
+    // 定义最终可执行程序。
+    // 这里单独使用 main.zig 作为入口，把 CLI / 启动逻辑和业务逻辑分开。
     const exe = b.addExecutable(.{
         .name = "backend",
         .root_module = b.createModule(.{
-            // b.createModule defines a new module just like b.addModule but,
-            // unlike b.addModule, it does not expose the module to consumers of
-            // this package, which is why in this case we don't have to give it a name.
+            // createModule 与 addModule 类似，但不会把该模块暴露给包外消费者。
+            // 这里正适合只给当前可执行程序使用的根模块。
             .root_source_file = b.path("src/main.zig"),
-            // Target and optimization levels must be explicitly wired in when
-            // defining an executable or library (in the root module), and you
-            // can also hardcode a specific target for an executable or library
-            // definition if desireable (e.g. firmware for embedded devices).
+            // 可执行程序的根模块需要显式绑定 target 和 optimize。
             .target = target,
             .optimize = optimize,
-            // List of modules available for import in source files part of the
-            // root module.
+            // 这里声明 main.zig 及其子依赖可以直接导入的模块列表。
             .imports = &.{
                 .{ .name = "backend", .module = mod },
-                .{ .name = "httpz", .module = b.dependency("httpz", .{
-                    .target = target,
-                    .optimize = optimize,
-                }).module("httpz") },
+                .{ .name = "httpz", .module = httpz_mod },
             },
         }),
     });
 
-    // This declares intent for the executable to be installed into the
-    // install prefix when running `zig build` (i.e. when executing the default
-    // step). By default the install prefix is `zig-out/` but can be overridden
-    // by passing `--prefix` or `-p`.
+    // Windows 下 httpz / websocket 最终都会落到 Winsock 符号，
+    // 因此这里显式链接 ws2_32，补齐 socket / bind / listen / recv / send 等导入。
+    if (target.result.os.tag == .windows) {
+        exe.root_module.linkSystemLibrary("ws2_32", .{});
+    }
+
+    // 把可执行文件挂到默认安装步骤，执行 `zig build` 时会输出到 zig-out。
     b.installArtifact(exe);
 
-    // This creates a top level step. Top level steps have a name and can be
-    // invoked by name when running `zig build` (e.g. `zig build run`).
-    // This will evaluate the `run` step rather than the default step.
-    // For a top level step to actually do something, it must depend on other
-    // steps (e.g. a Run step, as we will see in a moment).
+    // 定义顶层 run 步骤，允许通过 `zig build run` 直接启动程序。
     const run_step = b.step("run", "Run the app");
 
-    // This creates a RunArtifact step in the build graph. A RunArtifact step
-    // invokes an executable compiled by Zig. Steps will only be executed by the
-    // runner if invoked directly by the user (in the case of top level steps)
-    // or if another step depends on it, so it's up to you to define when and
-    // how this Run step will be executed. In our case we want to run it when
-    // the user runs `zig build run`, so we create a dependency link.
+    // RunArtifact 表示“先编译，再运行这个产物”。
+    // 这里把它挂到 run_step 下，使 `zig build run` 生效。
     const run_cmd = b.addRunArtifact(exe);
     run_step.dependOn(&run_cmd.step);
 
-    // By making the run step depend on the default step, it will be run from the
-    // installation directory rather than directly from within the cache directory.
+    // 让运行步骤依赖安装步骤，这样程序会从安装目录启动，而不是直接从缓存目录启动。
     run_cmd.step.dependOn(b.getInstallStep());
 
-    // This allows the user to pass arguments to the application in the build
-    // command itself, like this: `zig build run -- arg1 arg2 etc`
+    // 允许透传命令行参数，例如 `zig build run -- arg1 arg2`。
     if (b.args) |args| {
         run_cmd.addArgs(args);
     }
 
-    // Creates an executable that will run `test` blocks from the provided module.
-    // Here `mod` needs to define a target, which is why earlier we made sure to
-    // set the releative field.
+    // 为 backend 模块生成测试可执行程序，运行其中的 test 块。
     const mod_tests = b.addTest(.{
         .root_module = mod,
     });
 
-    // A run step that will run the test executable.
+    // 该步骤用于执行上面的模块测试产物。
     const run_mod_tests = b.addRunArtifact(mod_tests);
 
-    // Creates an executable that will run `test` blocks from the executable's
-    // root module. Note that test executables only test one module at a time,
-    // hence why we have to create two separate ones.
+    // main.zig 也单独生成一份测试产物。
+    // Zig 的测试可执行程序一次只针对一个根模块，因此这里拆成两份。
     const exe_tests = b.addTest(.{
         .root_module = exe.root_module,
     });
 
-    // A run step that will run the second test executable.
+    // 执行 main 根模块测试的步骤。
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
-    // A top level step for running all tests. dependOn can be called multiple
-    // times and since the two run steps do not depend on one another, this will
-    // make the two of them run in parallel.
+    // 顶层 test 步骤统一串起两组测试。
+    // 两者之间没有依赖关系，因此 Zig 可以并行运行。
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
 
-    // Just like flags, top level steps are also listed in the `--help` menu.
-    //
-    // The Zig build system is entirely implemented in userland, which means
-    // that it cannot hook into private compiler APIs. All compilation work
-    // orchestrated by the build system will result in other Zig compiler
-    // subcommands being invoked with the right flags defined. You can observe
-    // these invocations when one fails (or you pass a flag to increase
-    // verbosity) to validate assumptions and diagnose problems.
-    //
-    // Lastly, the Zig build system is relatively simple and self-contained,
-    // and reading its source code will allow you to master it.
+    // 顶层步骤和参数一样，都会出现在 `zig build --help` 中。
+    // Zig 的构建系统本质上是在用户态描述编译图，再由编译器按图执行具体子命令。
 }
