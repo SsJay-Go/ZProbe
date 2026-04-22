@@ -102,6 +102,7 @@ async function handleConfirm() {
   state.submitting = true
   try {
     const res = await createTcpConnection({ ...form })
+    console.log('createTcpConnection response:', res)
     if (!res?.success) {
       throw new Error(res?.message || '创建连接失败')
     }

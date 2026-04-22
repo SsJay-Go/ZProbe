@@ -1,4 +1,5 @@
 const std = @import("std");
+const modbus = @import("modbus");
 const model = @import("../models/connection.zig");
 
 pub fn validateTcpConnectRequest(payload: model.TcpConnectRequest) model.ConnectValidationError!void {
@@ -42,6 +43,20 @@ pub fn buildConnectionId(payload: model.TcpConnectRequest, id_buf: []u8) ![]cons
     return std.fmt.bufPrint(id_buf, "tcp-{x}", .{h});
 }
 
+pub fn establishTcpConnection(allocator: std.mem.Allocator, payload: model.TcpConnectRequest) model.ConnectValidationError!void {
+    // 当前后端还没有接入连接池，所以这里先用 modbus 包建立一次真实连接，
+    // 让“创建连接”接口至少具备可验证的实际建连能力，而不是只做参数校验。
+    var client = modbus.tcp.Client.connect(.{
+        .allocator = allocator,
+        .host = payload.host,
+        .port = payload.port,
+        .unit_id = payload.slaveId,
+    }) catch {
+        return error.TcpConnectFailed;
+    };
+    defer client.deinit();
+}
+
 pub fn validationErrorMessage(err: model.ConnectValidationError) []const u8 {
     return switch (err) {
         error.InvalidConnectionType => "连接类型必须为 tcp",
@@ -50,5 +65,6 @@ pub fn validationErrorMessage(err: model.ConnectValidationError) []const u8 {
         error.InvalidSlaveId => "Slave ID 范围必须为 1~247",
         error.InvalidTimeout => "超时范围必须为 100~120000 ms",
         error.InvalidRetryCount => "重试次数范围必须为 0~10",
+        error.TcpConnectFailed => "Modbus TCP 连接建立失败，请检查目标主机、端口和设备状态",
     };
 }

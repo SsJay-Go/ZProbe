@@ -3,8 +3,8 @@ const model = @import("../models/connection.zig");
 const service = @import("../services/connection_service.zig");
 
 /// 连接控制器：负责 HTTP 协议层与业务服务层的衔接。
-/// Node.js 语境里可理解为 controller（不承载核心业务规则）。
 pub fn connect(req: *httpz.Request, res: *httpz.Response) !void {
+    const allocator = req.arena;
     const maybe_payload = try req.json(model.TcpConnectRequest);
     if (maybe_payload == null) {
         res.setStatus(.bad_request);
@@ -15,6 +15,12 @@ pub fn connect(req: *httpz.Request, res: *httpz.Response) !void {
     const payload = maybe_payload.?;
     service.validateTcpConnectRequest(payload) catch |err| {
         res.setStatus(.bad_request);
+        try res.json(model.makeError(service.validationErrorMessage(err)), .{});
+        return;
+    };
+
+    service.establishTcpConnection(allocator, payload) catch |err| {
+        res.setStatus(.bad_gateway);
         try res.json(model.makeError(service.validationErrorMessage(err)), .{});
         return;
     };

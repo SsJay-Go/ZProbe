@@ -34,32 +34,44 @@ pub const Kevent = system.Kevent;
 
 const native_os = builtin.os.tag;
 
+const WSAData = extern struct {
+    wVersion: windows.WORD,
+    wHighVersion: windows.WORD,
+    szDescription: [257]u8,
+    szSystemStatus: [129]u8,
+    iMaxSockets: windows.WORD,
+    iMaxUdpDg: windows.WORD,
+    lpVendorInfo: ?[*:0]u8,
+};
+
+extern "ws2_32" fn WSAStartup(wVersionRequired: windows.WORD, lpWSAData: *WSAData) callconv(.winapi) c_int;
+
+var winsock_initialized = false;
+
+fn ensureWindowsSocketsInitialized() !void {
+    if (!winsock_initialized) {
+        var wsa_data: WSAData = undefined;
+        const rc = WSAStartup(0x0202, &wsa_data);
+        if (rc != 0) return error.Unexpected;
+        winsock_initialized = true;
+    }
+}
+
 pub fn socket(domain: u32, socket_type: u32, protocol: u32) !socket_t {
     if (native_os == .windows) {
-        // Zig 0.16 下直接走 std.posix.socket 更稳妥；
-        // 我们只负责剥离伪标志位，再通过 setSockFlags 补回兼容行为。
+        // Windows 下这里仍然走 libc socket，但必须先显式拦截失败返回值。
+        // 否则 rc 为 -1 时，后续整数到句柄的转换会在 @intCast 处直接 panic。
+        try ensureWindowsSocketsInitialized();
         const filtered_sock_type = socket_type & ~@as(u32, SOCK.NONBLOCK | SOCK.CLOEXEC);
         const rc = system.socket(domain, filtered_sock_type, protocol);
-        switch (posix.errno(rc)) {
-            .SUCCESS => {
-                // libc socket 返回的是整数句柄，而当前目标的 fd_t 被 std.c 映射成 HANDLE。
-                // 这里显式做一次从整数到句柄指针的转换，保证后续 close/ioctl 使用统一类型。
-                const fd: fd_t = @ptrFromInt(@as(usize, @intCast(rc)));
-                errdefer close(fd);
-                try setSockFlags(fd, socket_type);
-                return fd;
-            },
-            .ACCES => return error.AccessDenied,
-            .AFNOSUPPORT => return error.AddressFamilyNotSupported,
-            .INVAL => return error.ProtocolFamilyNotAvailable,
-            .MFILE => return error.ProcessFdQuotaExceeded,
-            .NFILE => return error.SystemFdQuotaExceeded,
-            .NOBUFS => return error.SystemResources,
-            .NOMEM => return error.SystemResources,
-            .PROTONOSUPPORT => return error.ProtocolNotSupported,
-            .PROTOTYPE => return error.SocketTypeNotSupported,
-            else => return error.Unexpected,
+        if (rc == -1) {
+            return error.Unexpected;
         }
+
+        const fd: fd_t = @ptrFromInt(@as(usize, @intCast(rc)));
+        errdefer close(fd);
+        try setSockFlags(fd, socket_type);
+        return fd;
     }
 
     const have_sock_flags = !builtin.target.os.tag.isDarwin() and native_os != .haiku;
@@ -163,7 +175,8 @@ pub fn fcntl(fd: fd_t, cmd: i32, arg: usize) !usize {
 
 pub fn close(fd: fd_t) void {
     if (native_os == .windows) {
-        return windows.CloseHandle(fd);
+        _ = system.close(fd);
+        return;
     }
     switch (posix.errno(system.close(fd))) {
         .BADF => unreachable, // Always a race condition.
