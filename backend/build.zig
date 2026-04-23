@@ -19,6 +19,11 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     const httpz_mod = httpz_dep.module("httpz");
+    const modbus_dep = b.dependency("modbus", .{
+        .target = target,
+        .optimize = optimize,
+    });
+    const modbus_mod = modbus_dep.module("modbus");
 
     // backend 模块承载共享业务代码，供测试和可执行程序共同复用。
     const mod = b.addModule("backend", .{
@@ -29,6 +34,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .imports = &.{
             .{ .name = "httpz", .module = httpz_mod },
+            .{ .name = "modbus", .module = modbus_mod },
         },
     });
 
@@ -47,6 +53,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "backend", .module = mod },
                 .{ .name = "httpz", .module = httpz_mod },
+                .{ .name = "modbus", .module = modbus_mod },
             },
         }),
     });

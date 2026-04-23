@@ -46,12 +46,13 @@ pub const ConnectValidationError = error{
     InvalidSlaveId,
     InvalidTimeout,
     InvalidRetryCount,
+    TcpConnectFailed,
 };
 
 pub fn makeConnectSuccess(connection: ConnectionInfo) ConnectSuccessResponse {
     return .{
         .success = true,
-        .message = "TCP 连接参数已接收，后端已完成校验",
+        .message = "TCP 连接已建立",
         .connection = connection,
     };
 }
