@@ -1,27 +1,25 @@
 const std = @import("std");
-const modbus = @import("modbus");
 const model = @import("../models/connection.zig");
+const connection_pool = @import("./connection_pool.zig");
+const tcp_transport = @import("../transports/tcp_transport.zig");
 
+/// 校验当前阶段仍在使用的 TCP connect 请求。
 pub fn validateTcpConnectRequest(payload: model.TcpConnectRequest) model.ConnectValidationError!void {
-    // 类型校验：避免未来扩展 RTU/ASCII 时误走 TCP 逻辑。
-    if (!std.mem.eql(u8, payload.type, "tcp")) {
-        return error.InvalidConnectionType;
-    }
+    const transport = model.parseTransportKind(payload.type) orelse return error.InvalidConnectionType;
+    if (transport != .tcp) return error.InvalidConnectionType;
 
-    // 基础可读性与地址合法性约束。
     if (payload.name.len == 0 or payload.name.len > 32) {
         return error.InvalidConnectionName;
     }
     if (payload.host.len == 0 or payload.host.len > 255) {
         return error.InvalidHost;
     }
-
-    // Modbus 从站地址常见范围。
+    if (payload.port == 0) {
+        return error.InvalidPort;
+    }
     if (payload.slaveId < 1 or payload.slaveId > 247) {
         return error.InvalidSlaveId;
     }
-
-    // 超时与重试属于系统保护参数，限制范围可防止异常配置造成资源浪费。
     if (payload.timeoutMs < 100 or payload.timeoutMs > 120_000) {
         return error.InvalidTimeout;
     }
@@ -30,41 +28,86 @@ pub fn validateTcpConnectRequest(payload: model.TcpConnectRequest) model.Connect
     }
 }
 
+/// 根据连接参数生成稳定连接 ID。
+///
+/// 后续即使接入 RTU / ASCII，也可以继续沿用“transport 前缀 + 参数哈希”这个模式。
 pub fn buildConnectionId(payload: model.TcpConnectRequest, id_buf: []u8) ![]const u8 {
-    // 使用稳定哈希构造演示连接 ID。
-    // 后续接入真实连接池后可替换为 UUID / 雪花 ID。
     var hasher = std.hash.Wyhash.init(0);
+    hasher.update("tcp");
     hasher.update(payload.name);
     hasher.update(payload.host);
     hasher.update(std.mem.asBytes(&payload.port));
     hasher.update(std.mem.asBytes(&payload.slaveId));
+    // hasher.final() 会返回一个 u64 哈希值，我们把它格式化成十六进制字符串，拼接上 "tcp-" 前缀，构成最终的连接 ID。
     const h = hasher.final();
 
     return std.fmt.bufPrint(id_buf, "tcp-{x}", .{h});
 }
 
-pub fn establishTcpConnection(allocator: std.mem.Allocator, payload: model.TcpConnectRequest) model.ConnectValidationError!void {
-    // 当前后端还没有接入连接池，所以这里先用 modbus 包建立一次真实连接，
-    // 让“创建连接”接口至少具备可验证的实际建连能力，而不是只做参数校验。
-    var client = modbus.tcp.Client.connect(.{
-        .allocator = allocator,
+/// 创建一条完整的 TCP 连接记录。
+///
+/// 这一步既会建立底层 Modbus TCP 客户端，也会把元数据复制成“长生命周期拥有内存”，
+/// 从而让这份记录可以安全放进连接注册表，而不依赖 req.arena。
+pub fn createTcpConnectionRecord(
+    allocator: std.mem.Allocator,
+    connection_id: []const u8,
+    payload: model.TcpConnectRequest,
+) model.ConnectCreateError!connection_pool.ConnectionRecord {
+    const client = tcp_transport.connect(allocator, .{
         .host = payload.host,
         .port = payload.port,
-        .unit_id = payload.slaveId,
-    }) catch {
-        return error.TcpConnectFailed;
+        .slaveId = payload.slaveId,
+    }) catch |err| switch (err) {
+        error.OutOfMemory => return error.OutOfMemory,
+        else => return error.TcpConnectFailed,
     };
-    defer client.deinit();
+    errdefer {
+        client.deinit();
+        allocator.destroy(client);
+    }
+    // 为了把短生命周期数据，转成长生命周期自有数据，必须在这里复制一份。
+    const owned_id = try allocator.dupe(u8, connection_id);
+    errdefer allocator.free(owned_id);
+
+    const owned_name = try allocator.dupe(u8, payload.name);
+    errdefer allocator.free(owned_name);
+
+    const owned_host = try allocator.dupe(u8, payload.host);
+    errdefer allocator.free(owned_host);
+
+    return .{
+        .id = owned_id,
+        .name = owned_name,
+        .transport = .tcp,
+        .slave_id = payload.slaveId,
+        .timeout_ms = payload.timeoutMs,
+        .retry_count = payload.retryCount,
+        .details = .{
+            .tcp = .{
+                .host = owned_host,
+                .port = payload.port,
+            },
+        },
+        .handle = .{ .tcp = client },
+    };
 }
 
 pub fn validationErrorMessage(err: model.ConnectValidationError) []const u8 {
     return switch (err) {
-        error.InvalidConnectionType => "连接类型必须为 tcp",
+        error.InvalidConnectionType => "当前接口只接受 tcp 类型连接",
         error.InvalidConnectionName => "连接名称长度必须在 1~32 之间",
         error.InvalidHost => "主机地址不能为空且长度不能超过 255",
+        error.InvalidPort => "TCP 端口必须大于 0",
         error.InvalidSlaveId => "Slave ID 范围必须为 1~247",
         error.InvalidTimeout => "超时范围必须为 100~120000 ms",
         error.InvalidRetryCount => "重试次数范围必须为 0~10",
+    };
+}
+
+pub fn createErrorMessage(err: model.ConnectCreateError) []const u8 {
+    return switch (err) {
+        error.OutOfMemory => "服务器内存不足，无法创建连接记录",
         error.TcpConnectFailed => "Modbus TCP 连接建立失败，请检查目标主机、端口和设备状态",
+        error.TransportNotImplemented => "当前传输类型尚未接入底层实现",
     };
 }

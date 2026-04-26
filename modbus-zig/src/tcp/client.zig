@@ -15,7 +15,7 @@ pub const ConnectOptions = struct {
 // TcpClient 负责：建立 TCP 连接、附加 MBAP 头、发送请求、读取响应、校验事务一致性。
 pub const TcpClient = struct {
     allocator: std.mem.Allocator,
-    runtime: std.Io.Threaded,
+    runtime: *std.Io.Threaded, // 堆指针：确保 io.userdata 稳定，不随 struct 移动而失效
     io: std.Io,
     stream: std.Io.net.Stream,
     unit_id: u8,
@@ -26,7 +26,11 @@ pub const TcpClient = struct {
 
         // Zig 0.16 的 std.Io.Threaded 可以提供一套跨平台的阻塞式 IO 运行时，
         // 当前库先用它把“能稳定通信”作为第一目标，不额外引入更复杂的异步抽象。
-        var runtime = std.Io.Threaded.init(options.allocator, .{});
+        // 堆分配 Threaded，使 io.userdata（= runtime 指针）在整个生命周期内地址不变。
+        // 若直接存值字段，connect() 返回时 struct 被复制/移动，io.userdata 指向旧栈地址 → 悬空指针。
+        const runtime = try options.allocator.create(std.Io.Threaded);
+        errdefer options.allocator.destroy(runtime);
+        runtime.* = std.Io.Threaded.init(options.allocator, .{});
         errdefer runtime.deinit();
 
         const io = runtime.io();
@@ -47,9 +51,10 @@ pub const TcpClient = struct {
     }
 
     pub fn deinit(self: *TcpClient) void {
-        // 先关 socket，再释放 IO runtime，避免句柄留在运行时内部。
+        // 先关 socket，再 deinit runtime（关闭后台线程），最后释放堆内存。
         self.stream.close(self.io);
         self.runtime.deinit();
+        self.allocator.destroy(self.runtime); // 对应 connect() 中的 allocator.create
     }
 
     // 常见数据采集场景：批量读取保持寄存器。
@@ -75,9 +80,14 @@ pub const TcpClient = struct {
     }
 
     fn readRegistersAlloc(self: *TcpClient, allocator: std.mem.Allocator, function: FunctionCode, start_address: u16, quantity: u16) ![]u16 {
-        var payload: [4]u8 = undefined;
-        const payload_len = try codec.encodeReadRegisters(payload[0..], function, start_address, quantity);
-        const parsed = try self.exchange(function, payload[0..payload_len]);
+        var pdu: [4]u8 = undefined;
+        const pdu_len = try codec.encodeReadRegisters(pdu[0..], function, start_address, quantity);
+
+        // response 必须在本函数栈帧上分配，确保 parsed.payload（指向 response 内部的切片）在
+        // decodeRegisterPayload 调用期间仍然有效。若放在 exchange() 内部，函数返回后栈帧销毁，
+        // 后续 allocator.alloc() 等调用可能覆盖那段内存，造成随机性解析错误。
+        var response: [codec.Limits.max_tcp_adu_size]u8 = undefined;
+        const parsed = try self.exchange(function, pdu[0..pdu_len], response[0..]);
 
         // 为了让调用方 API 更直接，这里由库分配结果缓冲区，外部只需要负责释放。
         const registers = try allocator.alloc(u16, quantity);
@@ -88,11 +98,14 @@ pub const TcpClient = struct {
     }
 
     fn exchangeWrite(self: *TcpClient, function: FunctionCode, payload: []const u8, start_address: u16, expected_tail: u16) !void {
-        const parsed = try self.exchange(function, payload);
+        // 同样把 response buffer 放在本帧，保证 validateWriteAck 读到的 payload 有效。
+        var response: [codec.Limits.max_tcp_adu_size]u8 = undefined;
+        const parsed = try self.exchange(function, payload, response[0..]);
         try codec.validateWriteAck(parsed.payload, start_address, expected_tail);
     }
 
-    fn exchange(self: *TcpClient, function: FunctionCode, payload: []const u8) !codec.ParsedResponse {
+    // response_buf 由调用方提供，确保返回的 ParsedResponse.payload 切片在调用方栈帧内有效。
+    fn exchange(self: *TcpClient, function: FunctionCode, payload: []const u8, response_buf: []u8) !codec.ParsedResponse {
         // 事务号在 Modbus TCP 中由主站递增生成，用于把请求和响应配对。
         const transaction_id = self.nextTransactionId();
 
@@ -102,35 +115,39 @@ pub const TcpClient = struct {
         // 这里每次临时构造 writer，逻辑最直观，也便于后续替换成更高级的连接复用策略。
         var writer_buffer: [codec.Limits.max_tcp_adu_size]u8 = undefined;
         var writer = self.stream.writer(self.io, writer_buffer[0..]);
-        try writer.writeAll(request[0..request_len]);
-        try writer.flush();
+        var chunks = [_][]const u8{request[0..request_len]};
+        try writer.interface.writeVecAll(&chunks);
+        try writer.interface.flush();
 
-        var response: [codec.Limits.max_tcp_adu_size]u8 = undefined;
-        const response_len = try self.readAdu(response[0..]);
-        return codec.parseTcpResponse(response[0..response_len], transaction_id, self.unit_id, function);
+        const response_len = try self.readAdu(response_buf);
+        return codec.parseTcpResponse(response_buf[0..response_len], transaction_id, self.unit_id, function);
     }
 
     fn readAdu(self: *TcpClient, buffer: []u8) !usize {
-        // 先读固定长度的 MBAP 头，再根据 length 字段补齐剩余 PDU。
-        try self.readExact(buffer[0..7]);
+        // 同一个响应帧内必须复用同一个 Reader，避免第一次读 MBAP 头时把 payload 预读到临时缓冲后丢失。
+        var reader_buffer: [codec.Limits.max_tcp_adu_size]u8 = undefined;
+        var reader = self.stream.reader(self.io, reader_buffer[0..]);
 
-        const length = std.mem.readInt(u16, @ptrCast(buffer[4..6]), .big);
+        // 先读固定长度的 MBAP 头，再根据 length 字段补齐剩余 PDU。
+        try self.readExactWithReader(&reader, buffer[0..7]);
+
+        const length: u16 = (@as(u16, buffer[4]) << 8) | @as(u16, buffer[5]);
         if (length < 2) return error.InvalidLengthField;
 
         const remain = @as(usize, length) - 1;
         const total_len = 7 + remain;
         if (buffer.len < total_len) return error.BufferTooSmall;
 
-        try self.readExact(buffer[7..total_len]);
+        try self.readExactWithReader(&reader, buffer[7..total_len]);
         return total_len;
     }
 
-    fn readExact(self: *TcpClient, buffer: []u8) !void {
-        // Modbus 帧长度明确，Reader.take(n) 很适合用来读取“恰好 n 字节”的协议数据。
-        var reader_buffer: [codec.Limits.max_tcp_adu_size]u8 = undefined;
-        var reader = self.stream.reader(self.io, reader_buffer[0..]);
-        const bytes = try reader.take(buffer.len);
-        @memcpy(buffer, bytes);
+    fn readExactWithReader(self: *TcpClient, reader: *std.Io.net.Stream.Reader, buffer: []u8) codec.ModbusError!void {
+        _ = self;
+        var fixed_writer = std.Io.Writer.fixed(buffer);
+        reader.interface.streamExact(&fixed_writer, buffer.len) catch {
+            return error.EndOfStream;
+        };
     }
 
     fn nextTransactionId(self: *TcpClient) u16 {

@@ -81,7 +81,7 @@ pub fn buildTcpRequest(dest: []u8, transaction_id: u16, unit_id: u8, function: F
     // length 字段表示“unit id + function code + payload”的长度。
     const header = MbapHeader{
         .transaction_id = transaction_id,
-        .length = @as(u16, @intCast(1 + pdu_payload.len)),
+        .length = @as(u16, @intCast(2 + pdu_payload.len)),
         .unit_id = unit_id,
     };
 

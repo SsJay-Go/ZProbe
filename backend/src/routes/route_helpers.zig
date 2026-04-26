@@ -1,9 +1,14 @@
 const httpz = @import("httpz");
+const context = @import("../context.zig");
 
-/// 统一的预检响应入口。
-/// 这里不负责写跨域头，跨域头仍由 app 层挂载的 CORS middleware 统一补齐；
-/// 它的职责只是让 OPTIONS 请求命中路由链，从而触发对应 middleware。
-pub fn preflight(_: *httpz.Request, res: *httpz.Response) !void {
+/// 统一的 OPTIONS 预检响应处理函数。
+/// 浏览器在跨域请求前会先发一个 OPTIONS 预检（preflight）请求，
+/// 若没有路由命中，httpz 的 CORS middleware 不会被触发，跨域就会失败。
+/// 这个函数只需返回 204，让请求能命中路由链并经过 middleware 补全跨域头。
+///
+/// 第一个参数类型必须与 Server(*context.App) 的泛型参数一致，
+/// 否则注册到 router.options 时类型不匹配，编译报错。
+pub fn preflight(_: *context.App, _: *httpz.Request, res: *httpz.Response) !void {
     res.setStatus(.no_content);
 }
 
