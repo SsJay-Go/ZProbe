@@ -9,6 +9,7 @@ import {
 } from '@element-plus/icons-vue'
 import RegisterView from '../views/RegisterView.vue'
 import TcpConnectionDialog from '../components/connection/TcpConnectionDialog.vue'
+import { disconnectConnection } from '../api/connection'
 
 const { t, locale } = useI18n()
 
@@ -20,23 +21,38 @@ function switchLang(lang) {
 const activeTab = ref('connection')
 const activeSubTab = ref('new-tcp')
 const tcpDialogVisible = ref(false)
+const isDisconnecting = ref(false)   // 断开中：禁用按钮，防止重复点击
 const connectionState = ref({
   connected: false,
   name: '',
+  connectionId: '',   // 后端返回的连接 ID，断开时需要带上
+  transport: '',
+  slaveId: 1,
 })
 
-const tabs = computed(() => [
-  {
-    name: 'connection', label: t('nav.connection'), icon: Link,
-    children: [
-      { name: 'new-tcp', label: t('nav.newTcp') },
-      { name: 'new-rtu', label: t('nav.newRtu') },
-      { name: 'new-ascii', label: t('nav.newAscii') },
-      { divider: true },
-      { name: 'manager', label: t('nav.manager') },
-      { name: 'scan-port', label: t('nav.scanPort') },
-    ]
-  },
+const tabs = computed(() => {
+  const isConnected = connectionState.value.connected
+  return [
+    {
+      name: 'connection', label: t('nav.connection'), icon: Link,
+      children: [
+        // 已连接时显示"断开"，未连接时显示"新建"；断开中时禁用防止重复操作。
+        {
+          name: 'new-tcp',
+          label: isConnected
+            ? (isDisconnecting.value ? t('nav.disconnecting') : t('nav.disconnectTcp'))
+            : t('nav.newTcp'),
+          danger: isConnected && !isDisconnecting.value,
+          disabled: isDisconnecting.value,
+        },
+        // 已连接或断开中时禁用其他连接选项，防止同时建立多个异类连接。
+        { name: 'new-rtu', label: t('nav.newRtu'), disabled: isConnected || isDisconnecting.value },
+        { name: 'new-ascii', label: t('nav.newAscii'), disabled: isConnected || isDisconnecting.value },
+        { divider: true },
+        { name: 'manager', label: t('nav.manager'), disabled: isConnected || isDisconnecting.value },
+        { name: 'scan-port', label: t('nav.scanPort'), disabled: isConnected || isDisconnecting.value },
+      ]
+    },
   {
     name: 'setup', label: t('nav.setup'), icon: Edit,
     children: [
@@ -104,15 +120,20 @@ const tabs = computed(() => [
       { name: 'about', label: t('nav.about') },
     ]
   },
-])
+]})
 
 function handleTabCommand(command) {
   const [tab, sub] = command.split('/')
   activeTab.value = tab
   activeSubTab.value = sub
 
-  // 只在用户点击“连接 -> 新建 TCP 连接”菜单项时弹出参数窗口。
+  // 已连接时点击"断开 TCP"→ 发送断开请求；断开中时忽略点击；未连接时→ 打开对话框。
   if (tab === 'connection' && sub === 'new-tcp') {
+    if (isDisconnecting.value) return   // 断开进行中，忽略重复点击
+    if (connectionState.value.connected) {
+      handleDisconnect()
+      return
+    }
     tcpDialogVisible.value = true
   }
 }
@@ -132,12 +153,35 @@ const currentSubLabel = computed(() => {
 })
 
 function handleTcpConnected(payload) {
-  // 这里仅维护 UI 状态；连接真实生命周期以后可迁移到 Pinia 统一管理。
+  const connection = payload?.connection || {}
   connectionState.value = {
     connected: true,
-    name: payload?.connection?.name || 'TCP',
+    name: connection.name || 'TCP',
+    connectionId: connection.id || '',
+    transport: connection.transport || 'tcp',
+    slaveId: connection.slaveId ?? 1,
   }
   ElMessage.success(`已连接: ${connectionState.value.name}`)
+}
+
+async function handleDisconnect() {
+  const { connectionId, name } = connectionState.value
+  if (!connectionId) {
+    ElMessage.warning('未找到连接 ID，无法断开')
+    return
+  }
+  isDisconnecting.value = true
+  ElMessage.info(`正在断开: ${name}...`)
+  try {
+    const res = await disconnectConnection(connectionId)
+    if (!res?.success) throw new Error(res?.message || '断开失败')
+    connectionState.value = { connected: false, name: '', connectionId: '', transport: '', slaveId: 1 }
+    ElMessage.success(`已断开: ${name}`)
+  } catch (e) {
+    ElMessage.error(e.message || '断开请求失败，请重试')
+  } finally {
+    isDisconnecting.value = false
+  }
 }
 </script>
 
@@ -180,8 +224,12 @@ function handleTcpConnected(payload) {
                   v-else
                   :key="`item-${idx}`"
                   :command="`${tab.name}/${child.name}`"
+                  :disabled="child.disabled || false"
                   class="nav-dropdown-item"
-                  :class="{ 'is-selected': activeTab === tab.name && activeSubTab === child.name }"
+                  :class="[
+                    { 'is-selected': activeTab === tab.name && activeSubTab === child.name },
+                    { 'text-red-500!': child.danger },
+                  ]"
                 >
                   {{ child.label }}
                 </el-dropdown-item>
@@ -217,7 +265,12 @@ function handleTcpConnected(payload) {
 
     <!-- 主内容区 -->
     <el-main class="bg-gray-50 p-0! overflow-hidden">
-      <RegisterView />
+      <RegisterView
+        :connected="connectionState.connected"
+        :connection-id="connectionState.connectionId"
+        :transport="connectionState.transport"
+        :slave-id="connectionState.slaveId"
+      />
     </el-main>
 
     <TcpConnectionDialog

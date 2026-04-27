@@ -156,7 +156,7 @@ async function handleConfirm() {
             </el-form-item>
 
             <el-form-item label="Slave ID" prop="slaveId">
-              <el-input-number v-model="form.slaveId" :min="1" :max="247" class="app-dialog-number" />
+              <el-input-number v-model="form.slaveId" :min="1" :max="247" class="app-dialog-number" disabled />
             </el-form-item>
 
             <el-form-item label="超时 (ms)" prop="timeoutMs">

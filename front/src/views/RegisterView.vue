@@ -1,9 +1,44 @@
 <script setup>
-import { ref, reactive, computed } from 'vue'
+import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { Plus, Delete, VideoPlay, VideoPause, Refresh, Setting } from '@element-plus/icons-vue'
+import { ElMessage } from 'element-plus'
+import { Plus, VideoPlay, VideoPause, Refresh, Setting } from '@element-plus/icons-vue'
+import { readRegisters } from '../api/modbus'
 
 const { t } = useI18n()
+
+const props = defineProps({
+  connected: {
+    type: Boolean,
+    default: false,
+  },
+  connectionId: {
+    type: String,
+    default: '',
+  },
+  transport: {
+    type: String,
+    default: '',
+  },
+  slaveId: {
+    type: Number,
+    default: 1,
+  },
+})
+
+function createRegisters(startAddress, quantity, previous = []) {
+  return Array.from({ length: quantity }, (_, index) => {
+    const previousRegister = previous[index]
+    return {
+      address: startAddress + index,
+      value: previousRegister?.value ?? 0,
+      prevValue: previousRegister?.prevValue ?? null,
+      changed: false,
+      alias: previousRegister?.alias ?? '',
+      desc: previousRegister?.desc ?? '',
+    }
+  })
+}
 
 // ========== 读取定义窗口 ==========
 const readWindows = ref([createDefaultWindow(1)])
@@ -20,16 +55,12 @@ function createDefaultWindow(id) {
     quantity: 10,
     scanRate: 1000,
     polling: false,
+    loading: false,
+    lastError: '',
+    lastReadAt: '',
     displayFormat: 'decimal',
     columns: 10,
-    registers: Array.from({ length: 10 }, (_, i) => ({
-      address: i,
-      value: 0,
-      prevValue: null,
-      changed: false,
-      alias: '',
-      desc: '',
-    })),
+    registers: createRegisters(0, 10),
   }
 }
 
@@ -43,6 +74,7 @@ function addWindow() {
 function removeWindow(id) {
   const idx = readWindows.value.findIndex(w => w.id === id)
   if (idx === -1 || readWindows.value.length <= 1) return
+  stopPolling(readWindows.value[idx])
   readWindows.value.splice(idx, 1)
   if (activeWindowId.value === id) {
     activeWindowId.value = readWindows.value[0].id
@@ -55,10 +87,10 @@ const activeWindow = computed(() =>
 
 // ========== 功能码选项 ==========
 const functionCodes = computed(() => [
-  { value: '01', label: t('register.fc01') },
-  { value: '02', label: t('register.fc02') },
-  { value: '03', label: t('register.fc03') },
-  { value: '04', label: t('register.fc04') },
+  { value: '01', label: t('register.fc01'), disabled: true },
+  { value: '02', label: t('register.fc02'), disabled: true },
+  { value: '03', label: t('register.fc03'), disabled: false },
+  { value: '04', label: t('register.fc04'), disabled: false },
 ])
 
 // ========== 显示格式 ==========
@@ -104,46 +136,133 @@ function formatValue(value, format) {
 // ========== 参数变更时刷新寄存器列表 ==========
 function applySettings() {
   const win = activeWindow.value
-  win.registers = Array.from({ length: win.quantity }, (_, i) => ({
-    address: win.startAddress + i,
-    value: 0,
-    prevValue: null,
-    changed: false,
-    alias: '',
-    desc: '',
-  }))
+  win.registers = createRegisters(win.startAddress, win.quantity, win.registers)
 }
 
 // ========== 轮询控制 ==========
 const pollingTimers = new Map()
 
-function togglePolling(win) {
-  win.polling = !win.polling
-  if (win.polling) {
-    // 模拟数据 - 实际使用时替换为真实请求
-    const timer = setInterval(() => {
-      win.registers.forEach(reg => {
-        reg.prevValue = reg.value
-        // 模拟：随机变化
-        reg.value = Math.floor(Math.random() * 65536)
-        reg.changed = reg.value !== reg.prevValue
-      })
-    }, win.scanRate)
-    pollingTimers.set(win.id, timer)
-  } else {
-    clearInterval(pollingTimers.get(win.id))
+const canEditSlaveId = computed(() => props.transport === 'rtu')
+const canRead = computed(() => props.connected && props.connectionId.length > 0)
+const currentSlaveId = computed(() => (canEditSlaveId.value ? activeWindow.value.slaveId : props.slaveId || 1))
+
+function stopPolling(win) {
+  const timer = pollingTimers.get(win.id)
+  if (timer) {
+    clearInterval(timer)
     pollingTimers.delete(win.id)
+  }
+  win.polling = false
+}
+
+function stopAllPolling() {
+  readWindows.value.forEach(stopPolling)
+}
+
+function mapFunctionCodeToTarget(functionCode) {
+  switch (functionCode) {
+    case '03':
+      return 'holding_registers'
+    case '04':
+      return 'input_registers'
+    default:
+      return null
   }
 }
 
-// ========== 单次读取 ==========
-function readOnce() {
-  const win = activeWindow.value
-  win.registers.forEach(reg => {
-    reg.prevValue = reg.value
-    reg.value = Math.floor(Math.random() * 65536)
-    reg.changed = reg.value !== reg.prevValue
+function applyReadResult(win, values) {
+  win.registers = Array.from({ length: win.quantity }, (_, index) => {
+    const existing = win.registers[index]
+    const nextValue = values[index] ?? 0
+
+    return {
+      address: win.startAddress + index,
+      value: nextValue,
+      prevValue: existing?.value ?? null,
+      changed: nextValue !== (existing?.value ?? null),
+      alias: existing?.alias ?? '',
+      desc: existing?.desc ?? '',
+    }
   })
+}
+
+async function readWindow(win, options = {}) {
+  if (!canRead.value) {
+    if (!options.silent) {
+      ElMessage.warning(t('register.connectFirst'))
+    }
+    stopPolling(win)
+    return false
+  }
+
+  const target = mapFunctionCodeToTarget(win.functionCode)
+  if (!target) {
+    if (!options.silent) {
+      ElMessage.warning(t('register.unsupportedFunction'))
+    }
+    stopPolling(win)
+    return false
+  }
+
+  if (win.loading) {
+    return false
+  }
+
+  win.loading = true
+
+  try {
+    const response = await readRegisters({
+      connectionId: props.connectionId,
+      target,
+      startAddress: win.startAddress,
+      quantity: win.quantity,
+      slaveId: canEditSlaveId.value ? win.slaveId : null,
+    })
+
+    if (!response?.success || !Array.isArray(response.registers)) {
+      const message = response?.message || t('register.readFailed')
+      if (!options.silent) {
+        ElMessage.error(message)
+      }
+      throw new Error(message)
+    }
+
+    applyReadResult(win, response.registers)
+    win.lastError = ''
+    win.lastReadAt = new Date().toLocaleTimeString()
+    return true
+  } catch (error) {
+    win.lastError = error?.response?.data?.message || error?.message || t('register.readFailed')
+    if (options.stopPollingOnError !== false) {
+      stopPolling(win)
+    }
+    return false
+  } finally {
+    win.loading = false
+  }
+}
+
+async function togglePolling(win) {
+  if (win.polling) {
+    stopPolling(win)
+    return
+  }
+
+  const initialReadSucceeded = await readWindow(win)
+  if (!initialReadSucceeded) {
+    return
+  }
+
+  win.polling = true
+  const timer = setInterval(() => {
+    void readWindow(win, { silent: true })
+  }, win.scanRate)
+  pollingTimers.set(win.id, timer)
+}
+
+// ========== 单次读取 ==========
+async function readOnce() {
+  await readWindow(activeWindow.value)
 }
 
 // ========== 写入寄存器（双击编辑） ==========
@@ -173,6 +292,52 @@ const registerRows = computed(() => {
   return rows
 })
 
+const detailHeaders = computed(() => {
+  const headers = []
+
+  for (let columnIndex = 0; columnIndex < activeWindow.value.columns; columnIndex += 1) {
+    headers.push(
+      {
+        key: `alias-${columnIndex}`,
+        type: 'alias',
+        label: t('register.alias'),
+      },
+      {
+        key: `value-${columnIndex}`,
+        type: 'value',
+        label: `${t('register.value')}${activeWindow.value.columns > 1 ? ` (+${columnIndex})` : ''}`,
+      },
+      {
+        key: `desc-${columnIndex}`,
+        type: 'desc',
+        label: t('register.description'),
+      }
+    )
+  }
+
+  return headers
+})
+
+function detailCells(row) {
+  return row.cells.flatMap((reg, index) => ([
+    {
+      key: reg ? `alias-${reg.address}` : `alias-empty-${index}`,
+      type: 'alias',
+      reg,
+    },
+    {
+      key: reg ? `value-${reg.address}` : `value-empty-${index}`,
+      type: 'value',
+      reg,
+    },
+    {
+      key: reg ? `desc-${reg.address}` : `desc-empty-${index}`,
+      type: 'desc',
+      reg,
+    },
+  ]))
+}
+
 function startEdit(reg) {
   editingCell.value = reg.address
   editValue.value = reg.value.toString()
@@ -187,6 +352,31 @@ function confirmEdit(reg) {
   }
   editingCell.value = null
 }
+
+watch(
+  () => [props.transport, props.slaveId],
+  () => {
+    if (props.transport !== 'rtu') {
+      readWindows.value.forEach((win) => {
+        win.slaveId = props.slaveId || 1
+      })
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => props.connected,
+  (connected) => {
+    if (!connected) {
+      stopAllPolling()
+    }
+  }
+)
+
+onBeforeUnmount(() => {
+  stopAllPolling()
+})
 </script>
 
 <template>
@@ -228,6 +418,7 @@ function confirmEdit(reg) {
         <el-input-number
           v-model="activeWindow.slaveId"
           :min="1" :max="247"
+          :disabled="!canEditSlaveId"
           size="small"
           controls-position="right"
           class="w-20!"
@@ -242,6 +433,7 @@ function confirmEdit(reg) {
             :key="fc.value"
             :label="fc.label"
             :value="fc.value"
+            :disabled="fc.disabled"
           />
         </el-select>
       </div>
@@ -300,12 +492,13 @@ function confirmEdit(reg) {
 
       <div class="flex items-center gap-1.5 ml-auto">
         <el-button size="small" @click="applySettings" :icon="Setting">{{ $t('register.apply') }}</el-button>
-        <el-button size="small" @click="readOnce" :icon="Refresh">{{ $t('register.readOnce') }}</el-button>
+        <el-button size="small" @click="readOnce" :icon="Refresh" :disabled="!canRead || activeWindow.loading" :loading="activeWindow.loading && !activeWindow.polling">{{ $t('register.readOnce') }}</el-button>
         <el-button
           size="small"
           :type="activeWindow.polling ? 'danger' : 'primary'"
           @click="togglePolling(activeWindow)"
           :icon="activeWindow.polling ? VideoPause : VideoPlay"
+          :disabled="!canRead || activeWindow.loading"
         >
           {{ activeWindow.polling ? $t('register.stop') : $t('register.poll') }}
         </el-button>
@@ -319,13 +512,18 @@ function confirmEdit(reg) {
         <thead class="sticky top-0 z-10">
           <tr class="bg-gray-50 text-gray-500">
             <th class="px-2 py-1.5 text-center font-medium border-b border-r border-gray-200 w-14">{{ $t('register.address') }}</th>
-            <template v-for="col in activeWindow.columns" :key="col">
-              <th class="px-2 py-1.5 text-left font-medium border-b border-r border-gray-200 w-24">{{ $t('register.alias') }}</th>
-              <th class="px-2 py-1.5 text-center font-medium border-b border-r border-gray-200 w-24">
-                {{ $t('register.value') }}{{ activeWindow.columns > 1 ? ` (+${col - 1})` : '' }}
-              </th>
-              <th class="px-2 py-1.5 text-left font-medium border-b border-r border-gray-200 w-28">{{ $t('register.description') }}</th>
-            </template>
+            <th
+              v-for="header in detailHeaders"
+              :key="header.key"
+              class="px-2 py-1.5 font-medium border-b border-r border-gray-200"
+              :class="[
+                header.type === 'value' ? 'text-center w-24' : 'text-left',
+                header.type === 'alias' ? 'w-24' : '',
+                header.type === 'desc' ? 'w-28' : '',
+              ]"
+            >
+              {{ header.label }}
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -337,42 +535,40 @@ function confirmEdit(reg) {
             <td class="px-2 py-1 border-b border-r border-gray-200 bg-gray-50 text-gray-500 font-mono text-center font-medium">
               {{ row.baseAddress.toString().padStart(5, '0') }}
             </td>
-            <template v-for="(reg, cIdx) in row.cells" :key="reg ? reg.address : `e${cIdx}`">
-              <!-- 别名 -->
-              <td class="px-2 py-1 border-b border-r border-gray-100 text-xs">
-                <input
-                  v-if="reg"
-                  v-model="reg.alias"
-                  class="w-full bg-transparent border-none outline-none text-xs text-gray-600 placeholder-gray-300"
-                  placeholder="别名"
-                />
-              </td>
-              <!-- 值 -->
-              <td
-                class="px-2 py-1 border-b border-r border-gray-100 text-center font-mono cursor-pointer select-none transition-colors"
-                :class="[
-                  reg?.changed ? 'bg-yellow-50 text-red-600 font-semibold' : 'text-gray-800',
-                  reg ? 'hover:bg-blue-50' : 'bg-gray-50/50'
-                ]"
-                @dblclick="reg && startEdit(reg)"
-              >
-                <template v-if="reg && editingCell === reg.address">
-                  <el-input v-model="editValue" size="small" class="w-full!" autofocus @keyup.enter="confirmEdit(reg)" @blur="confirmEdit(reg)" />
+            <td
+              v-for="cell in detailCells(row)"
+              :key="cell.key"
+              class="px-2 py-1 border-b border-r border-gray-100"
+              :class="[
+                cell.type === 'value' ? 'text-center font-mono cursor-pointer select-none transition-colors' : 'text-xs',
+                cell.type === 'value' && cell.reg?.changed ? 'bg-yellow-50 text-red-600 font-semibold' : '',
+                cell.type === 'value' && !cell.reg?.changed ? 'text-gray-800' : '',
+                cell.type === 'value' && cell.reg ? 'hover:bg-blue-50' : '',
+                cell.type === 'value' && !cell.reg ? 'bg-gray-50/50' : '',
+              ]"
+              @dblclick="cell.type === 'value' && cell.reg && startEdit(cell.reg)"
+            >
+              <input
+                v-if="cell.type === 'alias' && cell.reg"
+                v-model="cell.reg.alias"
+                class="w-full bg-transparent border-none outline-none text-xs text-gray-600 placeholder-gray-300"
+                :placeholder="$t('register.aliasPlaceholder')"
+              />
+              <template v-else-if="cell.type === 'value'">
+                <template v-if="cell.reg && editingCell === cell.reg.address">
+                  <el-input v-model="editValue" size="small" class="w-full!" autofocus @keyup.enter="confirmEdit(cell.reg)" @blur="confirmEdit(cell.reg)" />
                 </template>
-                <template v-else-if="reg">
-                  {{ formatValue(reg.value, activeWindow.displayFormat) }}
+                <template v-else-if="cell.reg">
+                  {{ formatValue(cell.reg.value, activeWindow.displayFormat) }}
                 </template>
-              </td>
-              <!-- 描述 -->
-              <td class="px-2 py-1 border-b border-r border-gray-100 text-xs">
-                <input
-                  v-if="reg"
-                  v-model="reg.desc"
-                  class="w-full bg-transparent border-none outline-none text-xs text-gray-500 placeholder-gray-300"
-                  placeholder="描述"
-                />
-              </td>
-            </template>
+              </template>
+              <input
+                v-else-if="cell.type === 'desc' && cell.reg"
+                v-model="cell.reg.desc"
+                class="w-full bg-transparent border-none outline-none text-xs text-gray-500 placeholder-gray-300"
+                :placeholder="$t('register.descPlaceholder')"
+              />
+            </td>
           </tr>
         </tbody>
       </table>
@@ -426,12 +622,15 @@ function confirmEdit(reg) {
     <!-- 底部状态栏 -->
     <div class="flex items-center justify-between px-3 py-1 bg-gray-50 border-t border-gray-200 text-[11px] text-gray-400 shrink-0">
       <div class="flex items-center gap-4">
-        <span>Slave: {{ activeWindow.slaveId }}</span>
+        <span>{{ $t('register.connection') }}: {{ connected ? connectionId : $t('register.noConnection') }}</span>
+        <span>Slave: {{ currentSlaveId }}</span>
         <span>FC: {{ activeWindow.functionCode }}</span>
         <span>{{ $t('register.address') }}: {{ activeWindow.startAddress }}–{{ activeWindow.startAddress + activeWindow.quantity - 1 }}</span>
         <span>{{ $t('register.quantity') }}: {{ activeWindow.quantity }}</span>
       </div>
       <div class="flex items-center gap-4">
+        <span v-if="activeWindow.lastError" class="text-red-500">{{ activeWindow.lastError }}</span>
+        <span v-if="activeWindow.lastReadAt">{{ $t('register.lastRead') }}: {{ activeWindow.lastReadAt }}</span>
         <span v-if="activeWindow.polling" class="text-green-600">
           ● {{ $t('register.pollingStatus') }} ({{ activeWindow.scanRate }}ms)
         </span>
