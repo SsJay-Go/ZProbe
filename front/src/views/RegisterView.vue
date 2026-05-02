@@ -87,10 +87,10 @@ const activeWindow = computed(() =>
 
 // ========== 功能码选项 ==========
 const functionCodes = computed(() => [
-  { value: '01', label: t('register.fc01'), disabled: true },
-  { value: '02', label: t('register.fc02'), disabled: true },
-  { value: '03', label: t('register.fc03'), disabled: false },
-  { value: '04', label: t('register.fc04'), disabled: false },
+  { value: '01', label: t('register.fc01'), disabled: true, target: null },
+  { value: '02', label: t('register.fc02'), disabled: true, target: null },
+  { value: '03', label: t('register.fc03'), disabled: false, target: 'holding_registers' },
+  { value: '04', label: t('register.fc04'), disabled: false, target: 'input_registers' },
 ])
 
 // ========== 显示格式 ==========
@@ -159,17 +159,6 @@ function stopAllPolling() {
   readWindows.value.forEach(stopPolling)
 }
 
-function mapFunctionCodeToTarget(functionCode) {
-  switch (functionCode) {
-    case '03':
-      return 'holding_registers'
-    case '04':
-      return 'input_registers'
-    default:
-      return null
-  }
-}
-
 function applyReadResult(win, values) {
   win.registers = Array.from({ length: win.quantity }, (_, index) => {
     const existing = win.registers[index]
@@ -195,7 +184,7 @@ async function readWindow(win, options = {}) {
     return false
   }
 
-  const target = mapFunctionCodeToTarget(win.functionCode)
+  const target = functionCodes.value.find(({ value }) => value === win.functionCode)?.target ?? null
   if (!target) {
     if (!options.silent) {
       ElMessage.warning(t('register.unsupportedFunction'))
