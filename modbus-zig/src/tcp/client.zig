@@ -110,6 +110,7 @@ pub const TcpClient = struct {
         const transaction_id = self.nextTransactionId();
 
         var request: [codec.Limits.max_tcp_adu_size]u8 = undefined;
+        // buildTcpRequest 把MBAP 头（包含事务 ID、协议 ID、长度、单元 ID）和 PDU（功能码 + 负载）组合成完整的请求帧
         const request_len = try codec.buildTcpRequest(request[0..], transaction_id, self.unit_id, function, payload);
 
         // 这里每次临时构造 writer，逻辑最直观，也便于后续替换成更高级的连接复用策略。

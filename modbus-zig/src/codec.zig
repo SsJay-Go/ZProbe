@@ -18,6 +18,7 @@ pub const FunctionCode = enum(u8) {
 // 这些限制来自 Modbus 应用协议本身。
 pub const Limits = struct {
     pub const max_tcp_adu_size: usize = 260;
+    pub const max_coil_quantity: u16 = 2000;
     pub const max_read_registers: u16 = 125;
     pub const max_write_registers: u16 = 123;
 };
@@ -120,6 +121,19 @@ pub fn parseTcpResponse(src: []const u8, expected_transaction_id: u16, expected_
         .function = expected_function,
         .payload = src[8..total_len],
     };
+}
+
+pub fn encodeReadCoils(dest: []u8, function: FunctionCode, start_address: u16, quantity: u16) ModbusError!usize {
+    switch (function) {
+        .read_coils, .read_discrete_inputs => {},
+        else => return error.UnsupportedFunction,
+    }
+    if (quantity == 0 or quantity > Limits.max_coil_quantity) return error.InvalidQuantity;
+    if (dest.len < 4) return error.BufferTooSmall;
+
+    writeU16(dest[0..2], start_address);
+    writeU16(dest[2..4], quantity);
+    return 4;
 }
 
 pub fn encodeReadRegisters(dest: []u8, function: FunctionCode, start_address: u16, quantity: u16) ModbusError!usize {

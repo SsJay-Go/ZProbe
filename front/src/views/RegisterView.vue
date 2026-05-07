@@ -87,8 +87,8 @@ const activeWindow = computed(() =>
 
 // ========== 功能码选项 ==========
 const functionCodes = computed(() => [
-  { value: '01', label: t('register.fc01'), disabled: true, target: null },
-  { value: '02', label: t('register.fc02'), disabled: true, target: null },
+  { value: '01', label: t('register.fc01'), disabled: true, target: 'read_coils' },
+  { value: '02', label: t('register.fc02'), disabled: true, target: 'read_discrete_inputs' },
   { value: '03', label: t('register.fc03'), disabled: false, target: 'holding_registers' },
   { value: '04', label: t('register.fc04'), disabled: false, target: 'input_registers' },
 ])
