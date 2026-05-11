@@ -37,7 +37,7 @@ fn readU16(src: []const u8) u16 {
 pub const MbapHeader = struct {
     transaction_id: u16,
     protocol_id: u16 = 0,
-    length: u16,
+    length: u16, // modbus协议汇总MBAP头的length属性  告诉接收方后面还有多少字节要读(2字节)：后续数据的字节数=从站地址(1字节) + PDU的长度
     unit_id: u8,
 
     pub fn encode(self: MbapHeader, dest: []u8) ModbusError!usize {
@@ -182,6 +182,27 @@ pub fn encodeWriteMultipleRegisters(dest: []u8, start_address: u16, values: []co
     return total_len;
 }
 
+pub fn decodeBitPayload(payload: []const u8, out: []bool, expected_bit_count: usize) ModbusError!void {
+    if (payload.len < 1) return error.ResponseTooShort;
+
+    // 位打包 (Coils / Discrete Inputs): 第 0 字节为字节数，随后每字节按 LSB->MSB 存放 8 个位。
+    const byte_count = payload[0];
+    if (byte_count == 0) return error.InvalidByteCount;
+    if (payload.len != @as(usize, byte_count) + 1) return error.UnexpectedPayloadLength;
+
+    const expected_byte_count = std.math.divCeil(usize, expected_bit_count, 8) catch unreachable;
+    if (byte_count != expected_byte_count) return error.UnexpectedPayloadLength;
+    if (out.len < expected_bit_count) return error.BufferTooSmall;
+
+    for (0..expected_bit_count) |i| {
+        // payload[0] 是字节数，所以真正的位数据从 payload[1] 开始
+        const byte_idx = 1 + (i / 8);
+        const bit_pos: u3 = @intCast(i % 8);
+        const b = payload[byte_idx];
+        out[i] = ((b >> bit_pos) & 0x1) != 0;
+    }
+}
+
 // 读取寄存器的响应负载结构为：字节数 + N 个 16 位寄存器值。
 pub fn decodeRegisterPayload(payload: []const u8, out: []u16) ModbusError!usize {
     if (payload.len < 1) return error.ResponseTooShort;
@@ -250,4 +271,28 @@ test "写多个寄存器请求会生成合法负载" {
     try std.testing.expectEqual(@as(u8, 0x06), payload[4]);
     try std.testing.expectEqual(@as(u8, 0x10), payload[5]);
     try std.testing.expectEqual(@as(u8, 0x01), payload[6]);
+}
+
+test "位负载会按请求数量精确解码" {
+    const payload = [_]u8{ 0x02, 0b01001101, 0b00000001 };
+    var out: [9]bool = undefined;
+
+    try decodeBitPayload(payload[0..], out[0..], 9);
+
+    try std.testing.expectEqual(true, out[0]);
+    try std.testing.expectEqual(false, out[1]);
+    try std.testing.expectEqual(true, out[2]);
+    try std.testing.expectEqual(true, out[3]);
+    try std.testing.expectEqual(false, out[4]);
+    try std.testing.expectEqual(false, out[5]);
+    try std.testing.expectEqual(true, out[6]);
+    try std.testing.expectEqual(false, out[7]);
+    try std.testing.expectEqual(true, out[8]);
+}
+
+test "位负载字节数必须与请求数量匹配" {
+    const payload = [_]u8{ 0x03, 0xFF, 0x00, 0x00 };
+    var out: [9]bool = undefined;
+
+    try std.testing.expectError(error.UnexpectedPayloadLength, decodeBitPayload(payload[0..], out[0..], 9));
 }

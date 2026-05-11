@@ -57,6 +57,10 @@ pub const TcpClient = struct {
         self.allocator.destroy(self.runtime); // 对应 connect() 中的 allocator.create
     }
 
+    pub fn readCoilsAlloc(self: *TcpClient, allocator: std.mem.Allocator, start_address: u16, quantity: u16) ![]bool {
+        return self.readBitsAlloc(allocator, .read_coils, start_address, quantity);
+    }
+
     // 常见数据采集场景：批量读取保持寄存器。
     pub fn readHoldingRegistersAlloc(self: *TcpClient, allocator: std.mem.Allocator, start_address: u16, quantity: u16) ![]u16 {
         return self.readRegistersAlloc(allocator, .read_holding_registers, start_address, quantity);
@@ -79,15 +83,23 @@ pub const TcpClient = struct {
         try self.exchangeWrite(.write_multiple_registers, payload[0..payload_len], start_address, @as(u16, @intCast(values.len)));
     }
 
-    fn readRegistersAlloc(self: *TcpClient, allocator: std.mem.Allocator, function: FunctionCode, start_address: u16, quantity: u16) ![]u16 {
-        var pdu: [4]u8 = undefined;
-        const pdu_len = try codec.encodeReadRegisters(pdu[0..], function, start_address, quantity);
+    fn readBitsAlloc(self: *TcpClient, allocator: std.mem.Allocator, function: FunctionCode, start_address: u16, quantity: u16) ![]bool {
+        var payload: [4]u8 = undefined;
+        const payload_len = try codec.encodeReadCoils(payload[0..], function, start_address, quantity);
+        const parsed = try self.exchange(function, payload[0..payload_len]);
 
-        // response 必须在本函数栈帧上分配，确保 parsed.payload（指向 response 内部的切片）在
-        // decodeRegisterPayload 调用期间仍然有效。若放在 exchange() 内部，函数返回后栈帧销毁，
-        // 后续 allocator.alloc() 等调用可能覆盖那段内存，造成随机性解析错误。
-        var response: [codec.Limits.max_tcp_adu_size]u8 = undefined;
-        const parsed = try self.exchange(function, pdu[0..pdu_len], response[0..]);
+        const u_quantity: usize = @intCast(quantity);
+        const bits = try allocator.alloc(bool, u_quantity);
+        errdefer allocator.free(bits);
+
+        try codec.decodeBitPayload(parsed.payload, bits, u_quantity);
+        return bits;
+    }
+
+    fn readRegistersAlloc(self: *TcpClient, allocator: std.mem.Allocator, function: FunctionCode, start_address: u16, quantity: u16) ![]u16 {
+        var payload: [4]u8 = undefined;
+        const payload_len = try codec.encodeReadRegisters(payload[0..], function, start_address, quantity);
+        const parsed = try self.exchange(function, payload[0..payload_len]);
 
         // 为了让调用方 API 更直接，这里由库分配结果缓冲区，外部只需要负责释放。
         const registers = try allocator.alloc(u16, quantity);
@@ -98,57 +110,49 @@ pub const TcpClient = struct {
     }
 
     fn exchangeWrite(self: *TcpClient, function: FunctionCode, payload: []const u8, start_address: u16, expected_tail: u16) !void {
-        // 同样把 response buffer 放在本帧，保证 validateWriteAck 读到的 payload 有效。
-        var response: [codec.Limits.max_tcp_adu_size]u8 = undefined;
-        const parsed = try self.exchange(function, payload, response[0..]);
+        const parsed = try self.exchange(function, payload);
         try codec.validateWriteAck(parsed.payload, start_address, expected_tail);
     }
 
-    // response_buf 由调用方提供，确保返回的 ParsedResponse.payload 切片在调用方栈帧内有效。
-    fn exchange(self: *TcpClient, function: FunctionCode, payload: []const u8, response_buf: []u8) !codec.ParsedResponse {
+    fn exchange(self: *TcpClient, function: FunctionCode, payload: []const u8) !codec.ParsedResponse {
         // 事务号在 Modbus TCP 中由主站递增生成，用于把请求和响应配对。
         const transaction_id = self.nextTransactionId();
 
         var request: [codec.Limits.max_tcp_adu_size]u8 = undefined;
-        // buildTcpRequest 把MBAP 头（包含事务 ID、协议 ID、长度、单元 ID）和 PDU（功能码 + 负载）组合成完整的请求帧
         const request_len = try codec.buildTcpRequest(request[0..], transaction_id, self.unit_id, function, payload);
 
         // 这里每次临时构造 writer，逻辑最直观，也便于后续替换成更高级的连接复用策略。
         var writer_buffer: [codec.Limits.max_tcp_adu_size]u8 = undefined;
         var writer = self.stream.writer(self.io, writer_buffer[0..]);
-        var chunks = [_][]const u8{request[0..request_len]};
-        try writer.interface.writeVecAll(&chunks);
-        try writer.interface.flush();
+        try writer.writeAll(request[0..request_len]);
+        try writer.flush();
 
-        const response_len = try self.readAdu(response_buf);
-        return codec.parseTcpResponse(response_buf[0..response_len], transaction_id, self.unit_id, function);
+        var response: [codec.Limits.max_tcp_adu_size]u8 = undefined;
+        const response_len = try self.readAdu(response[0..]);
+        return codec.parseTcpResponse(response[0..response_len], transaction_id, self.unit_id, function);
     }
 
     fn readAdu(self: *TcpClient, buffer: []u8) !usize {
-        // 同一个响应帧内必须复用同一个 Reader，避免第一次读 MBAP 头时把 payload 预读到临时缓冲后丢失。
-        var reader_buffer: [codec.Limits.max_tcp_adu_size]u8 = undefined;
-        var reader = self.stream.reader(self.io, reader_buffer[0..]);
-
         // 先读固定长度的 MBAP 头，再根据 length 字段补齐剩余 PDU。
-        try self.readExactWithReader(&reader, buffer[0..7]);
+        try self.readExact(buffer[0..7]);
 
-        const length: u16 = (@as(u16, buffer[4]) << 8) | @as(u16, buffer[5]);
+        const length = std.mem.readInt(u16, @ptrCast(buffer[4..6]), .big);
         if (length < 2) return error.InvalidLengthField;
 
         const remain = @as(usize, length) - 1;
         const total_len = 7 + remain;
         if (buffer.len < total_len) return error.BufferTooSmall;
 
-        try self.readExactWithReader(&reader, buffer[7..total_len]);
+        try self.readExact(buffer[7..total_len]);
         return total_len;
     }
 
-    fn readExactWithReader(self: *TcpClient, reader: *std.Io.net.Stream.Reader, buffer: []u8) codec.ModbusError!void {
-        _ = self;
-        var fixed_writer = std.Io.Writer.fixed(buffer);
-        reader.interface.streamExact(&fixed_writer, buffer.len) catch {
-            return error.EndOfStream;
-        };
+    fn readExact(self: *TcpClient, buffer: []u8) !void {
+        // Modbus 帧长度明确，Reader.take(n) 很适合用来读取“恰好 n 字节”的协议数据。
+        var reader_buffer: [codec.Limits.max_tcp_adu_size]u8 = undefined;
+        var reader = self.stream.reader(self.io, reader_buffer[0..]);
+        const bytes = try reader.take(buffer.len);
+        @memcpy(buffer, bytes);
     }
 
     fn nextTransactionId(self: *TcpClient) u16 {
