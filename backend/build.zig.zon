@@ -36,9 +36,6 @@
             .url = "git+https://github.com/karlseguin/http.zig?ref=master#a996009c3673862734d764e0338bc8ead73f1ab8",
             .hash = "httpz-0.0.0-PNVzrAe3BwDqESvfZXPGh4vM2J8JXWltsHxXYLZ8ShQe",
         },
-        .modbus = .{
-            .path = "../modbus-zig",
-        },
     },
     .paths = .{
         "build.zig",

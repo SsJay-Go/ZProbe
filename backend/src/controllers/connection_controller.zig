@@ -6,7 +6,7 @@ const context = @import("../context.zig");
 const controller_helpers = @import("./controller_helpers.zig");
 const connection_pool = @import("../services/connection_pool.zig");
 
-/// 新建 TCP 连接控制器。
+/// 新建连接控制器。
 ///
 /// 参数 app: *context.App 由 httpz 框架注入，携带全局连接池。
 /// 每次 HTTP 请求到来时，框架自动把 &app 传入，无需手动传参。
@@ -15,7 +15,7 @@ pub fn connect(app: *context.App, req: *httpz.Request, res: *httpz.Response) !vo
     // 长连接记录会跨请求存活，因此真正持久化的数据仍然要放到全局 allocator 上。
     const long_alloc = app.pool.allocator;
     // maybe_payload代表 optional 包装值 因为 req.json返回的类型是!?T （可能的 T 或错误），需要先 try 解包，再检查 null。
-    const maybe_payload = try req.json(model.TcpConnectRequest);
+    const maybe_payload = try req.json(model.ConnectRequest);
     if (maybe_payload == null) {
         controller_helpers.closeAfterResponse(res);
         res.setStatus(.bad_request);
@@ -24,7 +24,7 @@ pub fn connect(app: *context.App, req: *httpz.Request, res: *httpz.Response) !vo
     }
 
     const payload = maybe_payload.?;
-    service.validateTcpConnectRequest(payload) catch |err| {
+    service.validateConnectRequest(payload) catch |err| {
         controller_helpers.closeAfterResponse(res);
         res.setStatus(.bad_request);
         try res.json(model.makeError(service.validationErrorMessage(err)), .{});
@@ -48,12 +48,12 @@ pub fn connect(app: *context.App, req: *httpz.Request, res: *httpz.Response) !vo
 
     // 创建“完整连接记录”：
     // 里面既包含真实 TCP 客户端，也包含名字、连接 ID、传输细节等长生命周期元数据。
-    const record = service.createTcpConnectionRecord(long_alloc, connection_id, payload) catch |err| {
+    const record = service.createConnectionRecord(long_alloc, connection_id, payload) catch |err| {
         controller_helpers.closeAfterResponse(res);
 
         switch (err) {
             error.OutOfMemory => res.setStatus(.internal_server_error),
-            error.TcpConnectFailed => res.setStatus(.bad_gateway),
+            error.TcpConnectFailed, error.RtuConnectFailed => res.setStatus(.bad_gateway),
             error.TransportNotImplemented => res.setStatus(.not_implemented),
         }
 

@@ -19,6 +19,26 @@ export function createTcpConnection(payload) {
 }
 
 /**
+ * 创建 RTU 连接。
+ * @param {Object} payload
+ * @param {string} payload.name 连接名称
+ * @param {string} payload.serialPort 串口路径，例如 COM3 或 /dev/ttyUSB0
+ * @param {number} payload.baudRate 波特率
+ * @param {'none'|'even'|'odd'} payload.parity 校验位
+ * @param {number} payload.dataBits 数据位
+ * @param {number} payload.stopBits 停止位
+ * @param {number} payload.slaveId Modbus 从站地址
+ * @param {number} payload.timeoutMs 请求超时（毫秒）
+ * @param {number} payload.retryCount 失败重试次数
+ */
+export function createRtuConnection(payload) {
+  return request.post('/connection/connect', {
+    type: 'rtu',
+    ...payload,
+  })
+}
+
+/**
  * 断开连接。
  * @param {string} connectionId 后端返回的连接 ID
  */

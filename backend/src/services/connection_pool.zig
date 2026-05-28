@@ -1,5 +1,5 @@
 const std = @import("std");
-const modbus = @import("modbus");
+const libmodbus = @import("../protocol_bindings/libmodbus.zig");
 const connection_model = @import("../models/connection.zig");
 const modbus_model = @import("../models/modbus.zig");
 const rtu_transport = @import("../transports/rtu_transport.zig");
@@ -11,8 +11,8 @@ const ascii_transport = @import("../transports/ascii_transport.zig");
 /// 当前持有的到底是 TCP、RTU 还是 ASCII，一眼就能看出来；
 /// 调用读写时也显式 switch，不会把控制流藏到过深的抽象里。
 pub const ConnectionHandle = union(connection_model.TransportKind) {
-    tcp: *modbus.tcp.Client,
-    rtu: *rtu_transport.Client,
+    tcp: *libmodbus.Client,
+    rtu: *libmodbus.Client,
     ascii: *ascii_transport.Client,
 
     /// 统一释放底层连接。
@@ -37,7 +37,7 @@ pub const ConnectionHandle = union(connection_model.TransportKind) {
     ///
     /// 业务层不需要关心当前是哪个 transport；
     /// transport-specific 的差异都在这里集中分发。
-    pub fn readRegistersAlloc(
+    pub fn readValuesAlloc(
         self: *const ConnectionHandle,
         allocator: std.mem.Allocator,
         target: modbus_model.ReadTarget,
@@ -45,23 +45,34 @@ pub const ConnectionHandle = union(connection_model.TransportKind) {
         quantity: u16,
     ) ![]u16 {
         return switch (self.*) {
-            .tcp => |client| switch (target) {
+            .tcp, .rtu => |client| switch (target) {
+                .read_coils => client.readCoilsAlloc(allocator, start_address, quantity),
+                .read_discrete_inputs => client.readDiscreteInputsAlloc(allocator, start_address, quantity),
                 .holding_registers => client.readHoldingRegistersAlloc(allocator, start_address, quantity),
                 .input_registers => client.readInputRegistersAlloc(allocator, start_address, quantity),
             },
-            .rtu, .ascii => error.TransportNotSupported,
+            .ascii => error.TransportNotSupported,
         };
     }
 
     /// 统一写寄存器入口。
     ///
     /// 返回实际写入的寄存器个数，方便上层直接回包给前端。
-    pub fn writeRegisters(self: *const ConnectionHandle, request: modbus_model.WriteRequest) !u16 {
+    pub fn writeValues(self: *const ConnectionHandle, allocator: std.mem.Allocator, request: modbus_model.WriteRequest) !u16 {
         return switch (self.*) {
-            .tcp => |client| switch (request.target) {
+            .tcp, .rtu => |client| switch (request.target) {
+                .single_coil => {
+                    try client.writeSingleCoil(request.startAddress, request.value.?);
+                    return 1;
+                },
                 .single_register => {
                     try client.writeSingleRegister(request.startAddress, request.value.?);
                     return 1;
+                },
+                .multiple_coils => {
+                    const values = request.values.?;
+                    try client.writeMultipleCoils(allocator, request.startAddress, values);
+                    return @as(u16, @intCast(values.len));
                 },
                 .multiple_registers => {
                     const values = request.values.?;
@@ -69,7 +80,24 @@ pub const ConnectionHandle = union(connection_model.TransportKind) {
                     return @as(u16, @intCast(values.len));
                 },
             },
-            .rtu, .ascii => error.TransportNotSupported,
+            .ascii => error.TransportNotSupported,
+        };
+    }
+
+    pub fn writeAndReadRegistersAlloc(
+        self: *const ConnectionHandle,
+        allocator: std.mem.Allocator,
+        request: modbus_model.WriteReadRequest,
+    ) ![]u16 {
+        return switch (self.*) {
+            .tcp, .rtu => |client| client.writeAndReadRegistersAlloc(
+                allocator,
+                request.writeStartAddress,
+                request.values,
+                request.readStartAddress,
+                request.readQuantity,
+            ),
+            .ascii => error.TransportNotSupported,
         };
     }
 };

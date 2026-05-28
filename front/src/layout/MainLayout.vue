@@ -9,6 +9,7 @@ import {
 } from '@element-plus/icons-vue'
 import RegisterView from '../views/RegisterView.vue'
 import TcpConnectionDialog from '../components/connection/TcpConnectionDialog.vue'
+import RtuConnectionDialog from '../components/connection/RtuConnectionDialog.vue'
 import { disconnectConnection } from '../api/connection'
 
 const { t, locale } = useI18n()
@@ -21,6 +22,7 @@ function switchLang(lang) {
 const activeTab = ref('connection')
 const activeSubTab = ref('new-tcp')
 const tcpDialogVisible = ref(false)
+const rtuDialogVisible = ref(false)
 const isDisconnecting = ref(false)   // 断开中：禁用按钮，防止重复点击
 const connectionState = ref({
   connected: false,
@@ -28,6 +30,7 @@ const connectionState = ref({
   connectionId: '',   // 后端返回的连接 ID，断开时需要带上
   transport: '',
   slaveId: 1,
+  timeoutMs: 10000,
 })
 
 const tabs = computed(() => {
@@ -135,6 +138,17 @@ function handleTabCommand(command) {
       return
     }
     tcpDialogVisible.value = true
+    return
+  }
+
+  if (tab === 'connection' && sub === 'new-rtu') {
+    if (isDisconnecting.value || connectionState.value.connected) return
+    rtuDialogVisible.value = true
+    return
+  }
+
+  if (tab === 'connection' && sub === 'new-ascii') {
+    ElMessage.warning(t('nav.asciiUnsupported'))
   }
 }
 
@@ -160,6 +174,7 @@ function handleTcpConnected(payload) {
     connectionId: connection.id || '',
     transport: connection.transport || 'tcp',
     slaveId: connection.slaveId ?? 1,
+    timeoutMs: connection.timeoutMs ?? 10000,
   }
   ElMessage.success(`已连接: ${connectionState.value.name}`)
 }
@@ -175,7 +190,7 @@ async function handleDisconnect() {
   try {
     const res = await disconnectConnection(connectionId)
     if (!res?.success) throw new Error(res?.message || '断开失败')
-    connectionState.value = { connected: false, name: '', connectionId: '', transport: '', slaveId: 1 }
+    connectionState.value = { connected: false, name: '', connectionId: '', transport: '', slaveId: 1, timeoutMs: 10000 }
     ElMessage.success(`已断开: ${name}`)
   } catch (e) {
     ElMessage.error(e.message || '断开请求失败，请重试')
@@ -270,11 +285,18 @@ async function handleDisconnect() {
         :connection-id="connectionState.connectionId"
         :transport="connectionState.transport"
         :slave-id="connectionState.slaveId"
+        :timeout-ms="connectionState.timeoutMs"
+        :active-sub-tab="activeSubTab"
       />
     </el-main>
 
     <TcpConnectionDialog
       v-model="tcpDialogVisible"
+      @connected="handleTcpConnected"
+    />
+
+    <RtuConnectionDialog
+      v-model="rtuDialogVisible"
       @connected="handleTcpConnected"
     />
   </el-container>

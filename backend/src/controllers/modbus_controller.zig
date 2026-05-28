@@ -6,11 +6,10 @@ const service = @import("../services/modbus_service.zig");
 const controller_helpers = @import("./controller_helpers.zig");
 const std = @import("std");
 
-/// Modbus 读寄存器控制器。
+/// Modbus 读控制器。
 ///
-/// 当前先落地两类最常见的读取：
-/// 1. 保持寄存器
-/// 2. 输入寄存器
+/// 当前统一承载 FC01 / FC02 / FC03 / FC04 四类读取，
+/// 具体读的是 bit 还是寄存器，由请求里的 target 决定。
 pub fn readRegisters(app: *context.App, req: *httpz.Request, res: *httpz.Response) !void {
     const maybe_payload = try req.json(model.ReadRequest);
     if (maybe_payload == null) {
@@ -44,14 +43,12 @@ pub fn readRegisters(app: *context.App, req: *httpz.Request, res: *httpz.Respons
     };
 
     controller_helpers.closeAfterResponse(res);
-    try res.json(model.makeReadSuccess(registers), .{});
+    try res.json(model.makeReadSuccessForTarget(payload.target, registers), .{});
 }
 
-/// Modbus 写寄存器控制器。
+/// Modbus 写控制器。
 ///
-/// 当前先落地：
-/// 1. 单寄存器写入
-/// 2. 多寄存器写入
+/// 当前统一承载 FC05 / FC06 / FC0F / FC10 四类写入。
 pub fn writeRegister(app: *context.App, req: *httpz.Request, res: *httpz.Response) !void {
     const maybe_payload = try req.json(model.WriteRequest);
     if (maybe_payload == null) {
@@ -69,7 +66,7 @@ pub fn writeRegister(app: *context.App, req: *httpz.Request, res: *httpz.Respons
         return;
     };
 
-    const written_count = service.write(&app.pool, payload) catch |err| {
+    const written_count = service.write(&app.pool, req.arena, payload) catch |err| {
         controller_helpers.closeAfterResponse(res);
 
         switch (err) {
@@ -85,4 +82,40 @@ pub fn writeRegister(app: *context.App, req: *httpz.Request, res: *httpz.Respons
 
     controller_helpers.closeAfterResponse(res);
     try res.json(model.makeWriteSuccess(written_count), .{});
+}
+
+/// FC17 读写多寄存器控制器。
+pub fn writeAndReadRegisters(app: *context.App, req: *httpz.Request, res: *httpz.Response) !void {
+    const maybe_payload = try req.json(model.WriteReadRequest);
+    if (maybe_payload == null) {
+        controller_helpers.closeAfterResponse(res);
+        res.setStatus(.bad_request);
+        try res.json(connection_model.makeError("请求体不能为空"), .{});
+        return;
+    }
+
+    const payload = maybe_payload.?;
+    service.validateWriteReadRequest(payload) catch |err| {
+        controller_helpers.closeAfterResponse(res);
+        res.setStatus(.bad_request);
+        try res.json(connection_model.makeError(service.errorMessage(err)), .{});
+        return;
+    };
+
+    const values = service.writeAndRead(&app.pool, req.arena, payload) catch |err| {
+        controller_helpers.closeAfterResponse(res);
+
+        switch (err) {
+            error.ConnectionNotFound => res.setStatus(.not_found),
+            error.TransportNotSupported => res.setStatus(.not_implemented),
+            error.ModbusOperationFailed => res.setStatus(.bad_gateway),
+            else => res.setStatus(.bad_request),
+        }
+
+        try res.json(connection_model.makeError(service.errorMessage(err)), .{});
+        return;
+    };
+
+    controller_helpers.closeAfterResponse(res);
+    try res.json(model.makeWriteReadSuccess(values), .{});
 }

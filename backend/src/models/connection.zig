@@ -23,42 +23,16 @@ pub const SerialParity = enum {
 ///
 /// 这次重构先把 TCP 做实，因此当前 connect 接口仍然接受这份 payload。
 /// 后续若要同时支持 RTU / ASCII，可再新增独立请求模型或泛型 connect payload。
-pub const TcpConnectRequest = struct {
+pub const ConnectRequest = struct {
     type: []const u8,
     name: []const u8,
-    host: []const u8,
-    port: u16,
-    slaveId: u8,
-    timeoutMs: u32,
-    retryCount: u8,
-};
-
-/// 预留给 RTU 的配置模型。
-///
-/// 当前后端还不会真正建立 RTU 连接，但先把字段形状固定下来，
-/// 后续扩展时就不会反复推翻前面的领域模型。
-pub const RtuConnectRequest = struct {
-    type: []const u8,
-    name: []const u8,
-    serialPort: []const u8,
-    baudRate: u32,
-    dataBits: u8,
-    parity: SerialParity,
-    stopBits: u8,
-    slaveId: u8,
-    timeoutMs: u32,
-    retryCount: u8,
-};
-
-/// 预留给 ASCII 的配置模型。
-pub const AsciiConnectRequest = struct {
-    type: []const u8,
-    name: []const u8,
-    serialPort: []const u8,
-    baudRate: u32,
-    dataBits: u8,
-    parity: SerialParity,
-    stopBits: u8,
+    host: ?[]const u8 = null,
+    port: ?u16 = null,
+    serialPort: ?[]const u8 = null,
+    baudRate: ?u32 = null,
+    dataBits: ?u8 = null,
+    parity: ?SerialParity = null,
+    stopBits: ?u8 = null,
     slaveId: u8,
     timeoutMs: u32,
     retryCount: u8,
@@ -130,9 +104,14 @@ pub const ErrorResponse = struct {
 /// 这类错误会映射成 400 Bad Request，因为问题在调用方输入。
 pub const ConnectValidationError = error{
     InvalidConnectionType,
+    UnsupportedTransport,
     InvalidConnectionName,
     InvalidHost,
     InvalidPort,
+    InvalidSerialPort,
+    InvalidBaudRate,
+    InvalidDataBits,
+    InvalidStopBits,
     InvalidSlaveId,
     InvalidTimeout,
     InvalidRetryCount,
@@ -143,6 +122,7 @@ pub const ConnectValidationError = error{
 /// 这类错误表示参数已经合法，但底层传输层或内存分配失败。
 pub const ConnectCreateError = std.mem.Allocator.Error || error{
     TcpConnectFailed,
+    RtuConnectFailed,
     TransportNotImplemented,
 };
 

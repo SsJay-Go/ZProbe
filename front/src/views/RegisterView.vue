@@ -3,7 +3,7 @@ import { ref, computed, watch, onBeforeUnmount } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import { Plus, VideoPlay, VideoPause, Refresh, Setting } from '@element-plus/icons-vue'
-import { readRegisters } from '../api/modbus'
+import { readRegisters, writeRegisters, writeReadRegisters } from '../api/modbus'
 
 const { t } = useI18n()
 
@@ -24,6 +24,14 @@ const props = defineProps({
     type: Number,
     default: 1,
   },
+  timeoutMs: {
+    type: Number,
+    default: 10000,
+  },
+  activeSubTab: {
+    type: String,
+    default: '',
+  },
 })
 
 function createRegisters(startAddress, quantity, previous = []) {
@@ -40,7 +48,6 @@ function createRegisters(startAddress, quantity, previous = []) {
   })
 }
 
-// ========== 读取定义窗口 ==========
 const readWindows = ref([createDefaultWindow(1)])
 const activeWindowId = ref(1)
 let windowIdCounter = 1
@@ -52,20 +59,22 @@ function createDefaultWindow(id) {
     slaveId: 1,
     functionCode: '03',
     startAddress: 0,
+    writeStartAddress: 0,
     quantity: 10,
     scanRate: 1000,
     polling: false,
     loading: false,
     lastError: '',
-    lastReadAt: '',
+    lastActionAt: '',
     displayFormat: 'decimal',
     columns: 10,
+    valueKind: 'register',
     registers: createRegisters(0, 10),
   }
 }
 
 function addWindow() {
-  windowIdCounter++
+  windowIdCounter += 1
   const win = createDefaultWindow(windowIdCounter)
   readWindows.value.push(win)
   activeWindowId.value = win.id
@@ -85,15 +94,18 @@ const activeWindow = computed(() =>
   readWindows.value.find(w => w.id === activeWindowId.value) || readWindows.value[0]
 )
 
-// ========== 功能码选项 ==========
 const functionCodes = computed(() => [
-  { value: '01', label: t('register.fc01'), disabled: true, target: 'read_coils' },
-  { value: '02', label: t('register.fc02'), disabled: true, target: 'read_discrete_inputs' },
-  { value: '03', label: t('register.fc03'), disabled: false, target: 'holding_registers' },
-  { value: '04', label: t('register.fc04'), disabled: false, target: 'input_registers' },
+  { value: '01', label: t('register.fc01'), mode: 'read', readTarget: 'read_coils', valueKind: 'bit', maxQuantity: 2000 },
+  { value: '02', label: t('register.fc02'), mode: 'read', readTarget: 'read_discrete_inputs', valueKind: 'bit', maxQuantity: 2000 },
+  { value: '03', label: t('register.fc03'), mode: 'read', readTarget: 'holding_registers', valueKind: 'register', maxQuantity: 125 },
+  { value: '04', label: t('register.fc04'), mode: 'read', readTarget: 'input_registers', valueKind: 'register', maxQuantity: 125 },
+  { value: '05', label: t('register.fc05'), mode: 'write', writeTarget: 'single_coil', valueKind: 'bit', maxQuantity: 1 },
+  { value: '06', label: t('register.fc06'), mode: 'write', writeTarget: 'single_register', valueKind: 'register', maxQuantity: 1 },
+  { value: '0F', label: t('register.fc0f'), mode: 'write', writeTarget: 'multiple_coils', valueKind: 'bit', maxQuantity: 1968 },
+  { value: '10', label: t('register.fc10'), mode: 'write', writeTarget: 'multiple_registers', valueKind: 'register', maxQuantity: 123 },
+  { value: '17', label: t('register.fc17'), mode: 'write_read', valueKind: 'register', maxQuantity: 121 },
 ])
 
-// ========== 显示格式 ==========
 const displayFormats = computed(() => [
   { value: 'decimal', label: t('register.decimal') },
   { value: 'unsigned', label: t('register.unsigned') },
@@ -103,13 +115,31 @@ const displayFormats = computed(() => [
   { value: 'ascii', label: t('register.ascii') },
 ])
 
-// ========== 数据格式化 ==========
+function functionSpecForCode(code) {
+  return functionCodes.value.find(item => item.value === code) || functionCodes.value.find(item => item.value === '03')
+}
+
+const activeFunction = computed(() => functionSpecForCode(activeWindow.value.functionCode))
+const isReadMode = computed(() => activeFunction.value?.mode === 'read')
+const isWriteMode = computed(() => activeFunction.value?.mode === 'write')
+const isWriteReadMode = computed(() => activeFunction.value?.mode === 'write_read')
+const currentQuantityMax = computed(() => activeFunction.value?.maxQuantity ?? 125)
+const actionLabel = computed(() => {
+  if (isReadMode.value) return t('register.readOnce')
+  if (isWriteReadMode.value) return t('register.writeReadNow')
+  return t('register.writeNow')
+})
+const currentModeLabel = computed(() => {
+  if (isReadMode.value) return t('register.modeRead')
+  if (isWriteReadMode.value) return t('register.modeWriteRead')
+  return t('register.modeWrite')
+})
+
 function formatValue(value, format) {
   if (value === null || value === undefined) return '-'
   const v = Number(value)
   switch (format) {
     case 'decimal': {
-      // Signed 16-bit
       const signed = v > 32767 ? v - 65536 : v
       return signed.toString()
     }
@@ -133,17 +163,39 @@ function formatValue(value, format) {
   }
 }
 
-// ========== 参数变更时刷新寄存器列表 ==========
+function syncWindowForFunction(win) {
+  const spec = functionSpecForCode(win.functionCode)
+  win.valueKind = spec.valueKind
+
+  if (win.quantity < 1) {
+    win.quantity = 1
+  }
+  if (win.quantity > spec.maxQuantity) {
+    win.quantity = spec.maxQuantity
+  }
+  if (spec.maxQuantity === 1) {
+    win.quantity = 1
+    win.columns = 1
+  }
+
+  if (win.displayFormat === 'float' && spec.valueKind === 'bit') {
+    win.displayFormat = 'decimal'
+  }
+  if (win.displayFormat === 'ascii' && spec.valueKind === 'bit') {
+    win.displayFormat = 'decimal'
+  }
+}
+
 function applySettings() {
   const win = activeWindow.value
+  syncWindowForFunction(win)
   win.registers = createRegisters(win.startAddress, win.quantity, win.registers)
 }
 
-// ========== 轮询控制 ==========
 const pollingTimers = new Map()
 
 const canEditSlaveId = computed(() => props.transport === 'rtu')
-const canRead = computed(() => props.connected && props.connectionId.length > 0)
+const canOperate = computed(() => props.connected && props.connectionId.length > 0)
 const currentSlaveId = computed(() => (canEditSlaveId.value ? activeWindow.value.slaveId : props.slaveId || 1))
 
 function stopPolling(win) {
@@ -159,13 +211,13 @@ function stopAllPolling() {
   readWindows.value.forEach(stopPolling)
 }
 
-function applyReadResult(win, values) {
-  win.registers = Array.from({ length: win.quantity }, (_, index) => {
+function applyReadResult(win, values, startAddress = win.startAddress) {
+  win.registers = Array.from({ length: values.length }, (_, index) => {
     const existing = win.registers[index]
     const nextValue = values[index] ?? 0
 
     return {
-      address: win.startAddress + index,
+      address: startAddress + index,
       value: nextValue,
       prevValue: existing?.value ?? null,
       changed: nextValue !== (existing?.value ?? null),
@@ -175,8 +227,12 @@ function applyReadResult(win, values) {
   })
 }
 
+function currentSlaveOverride(win) {
+  return canEditSlaveId.value ? win.slaveId : null
+}
+
 async function readWindow(win, options = {}) {
-  if (!canRead.value) {
+  if (!canOperate.value) {
     if (!options.silent) {
       ElMessage.warning(t('register.connectFirst'))
     }
@@ -184,8 +240,8 @@ async function readWindow(win, options = {}) {
     return false
   }
 
-  const target = functionCodes.value.find(({ value }) => value === win.functionCode)?.target ?? null
-  if (!target) {
+  const spec = functionSpecForCode(win.functionCode)
+  if (spec.mode !== 'read' || !spec.readTarget) {
     if (!options.silent) {
       ElMessage.warning(t('register.unsupportedFunction'))
     }
@@ -198,37 +254,150 @@ async function readWindow(win, options = {}) {
   }
 
   win.loading = true
-
   try {
     const response = await readRegisters({
       connectionId: props.connectionId,
-      target,
+      target: spec.readTarget,
       startAddress: win.startAddress,
       quantity: win.quantity,
-      slaveId: canEditSlaveId.value ? win.slaveId : null,
+      slaveId: currentSlaveOverride(win),
+      timeoutMs: props.timeoutMs,
     })
 
-    if (!response?.success || !Array.isArray(response.registers)) {
-      const message = response?.message || t('register.readFailed')
-      if (!options.silent) {
-        ElMessage.error(message)
-      }
-      throw new Error(message)
+    if (!response?.success || !Array.isArray(response.values)) {
+      throw new Error(response?.message || t('register.readFailed'))
     }
 
-    applyReadResult(win, response.registers)
+    win.valueKind = response.valueKind || spec.valueKind
+    applyReadResult(win, response.values, win.startAddress)
     win.lastError = ''
-    win.lastReadAt = new Date().toLocaleTimeString()
+    win.lastActionAt = new Date().toLocaleTimeString()
     return true
   } catch (error) {
     win.lastError = error?.response?.data?.message || error?.message || t('register.readFailed')
     if (options.stopPollingOnError !== false) {
       stopPolling(win)
     }
+    if (!options.silent) {
+      ElMessage.error(win.lastError)
+    }
     return false
   } finally {
     win.loading = false
   }
+}
+
+function collectWindowValues(win, valueKind) {
+  return win.registers.slice(0, win.quantity).map((item) => {
+    const numeric = Number(item.value)
+    if (valueKind === 'bit') {
+      return numeric === 0 ? 0 : 1
+    }
+    return numeric & 0xFFFF
+  })
+}
+
+async function writeWindow(win) {
+  if (!canOperate.value) {
+    ElMessage.warning(t('register.connectFirst'))
+    return false
+  }
+
+  const spec = functionSpecForCode(win.functionCode)
+  if (spec.mode !== 'write' || !spec.writeTarget) {
+    ElMessage.warning(t('register.unsupportedFunction'))
+    return false
+  }
+
+  if (win.loading) {
+    return false
+  }
+
+  win.loading = true
+  try {
+    const payload = {
+      connectionId: props.connectionId,
+      target: spec.writeTarget,
+      startAddress: win.startAddress,
+      slaveId: currentSlaveOverride(win),
+      timeoutMs: props.timeoutMs,
+    }
+
+    if (spec.maxQuantity === 1) {
+      payload.value = collectWindowValues(win, spec.valueKind)[0] ?? 0
+    } else {
+      payload.values = collectWindowValues(win, spec.valueKind)
+    }
+
+    const response = await writeRegisters(payload)
+    if (!response?.success) {
+      throw new Error(response?.message || t('register.writeFailed'))
+    }
+
+    win.lastError = ''
+    win.lastActionAt = new Date().toLocaleTimeString()
+    ElMessage.success(response?.message || t('register.writeSucceeded'))
+    return true
+  } catch (error) {
+    win.lastError = error?.response?.data?.message || error?.message || t('register.writeFailed')
+    ElMessage.error(win.lastError)
+    return false
+  } finally {
+    win.loading = false
+  }
+}
+
+async function writeReadWindow(win) {
+  if (!canOperate.value) {
+    ElMessage.warning(t('register.connectFirst'))
+    return false
+  }
+
+  if (win.loading) {
+    return false
+  }
+
+  win.loading = true
+  try {
+    const response = await writeReadRegisters({
+      connectionId: props.connectionId,
+      slaveId: currentSlaveOverride(win),
+      writeStartAddress: win.writeStartAddress,
+      values: collectWindowValues(win, 'register'),
+      readStartAddress: win.startAddress,
+      readQuantity: win.quantity,
+      timeoutMs: props.timeoutMs,
+    })
+
+    if (!response?.success || !Array.isArray(response.values)) {
+      throw new Error(response?.message || t('register.writeReadFailed'))
+    }
+
+    win.valueKind = response.valueKind || 'register'
+    applyReadResult(win, response.values, win.startAddress)
+    win.lastError = ''
+    win.lastActionAt = new Date().toLocaleTimeString()
+    return true
+  } catch (error) {
+    win.lastError = error?.response?.data?.message || error?.message || t('register.writeReadFailed')
+    ElMessage.error(win.lastError)
+    return false
+  } finally {
+    win.loading = false
+  }
+}
+
+async function executeActiveWindow() {
+  const win = activeWindow.value
+  if (isReadMode.value) {
+    await readWindow(win)
+    return
+  }
+  if (isWriteReadMode.value) {
+    await writeReadWindow(win)
+    return
+  }
+  await writeWindow(win)
 }
 
 async function togglePolling(win) {
@@ -249,16 +418,8 @@ async function togglePolling(win) {
   pollingTimers.set(win.id, timer)
 }
 
-// ========== 单次读取 ==========
-async function readOnce() {
-  await readWindow(activeWindow.value)
-}
-
-// ========== 写入寄存器（双击编辑） ==========
 const editingCell = ref(null)
 const editValue = ref('')
-
-// ========== 列数选项和多列布局 ==========
 const columnOptions = [1, 2, 5, 10, 15, 20, 25, 30]
 
 const isDetailMode = computed(() => activeWindow.value.columns <= 5)
@@ -270,7 +431,7 @@ const registerRows = computed(() => {
   const rows = []
   for (let i = 0; i < regs.length; i += cols) {
     const cells = []
-    for (let j = 0; j < cols; j++) {
+    for (let j = 0; j < cols; j += 1) {
       cells.push(i + j < regs.length ? regs[i + j] : null)
     }
     rows.push({
@@ -334,12 +495,33 @@ function startEdit(reg) {
 
 function confirmEdit(reg) {
   const v = parseInt(editValue.value, 10)
-  if (!isNaN(v)) {
-    reg.prevValue = reg.value
-    reg.value = v & 0xFFFF
-    reg.changed = true
+  if (Number.isNaN(v)) {
+    editingCell.value = null
+    return
   }
+
+  if (activeWindow.value.valueKind === 'bit' && v !== 0 && v !== 1) {
+    ElMessage.warning(t('register.bitOnlyValue'))
+    editingCell.value = null
+    return
+  }
+
+  reg.prevValue = reg.value
+  reg.value = activeWindow.value.valueKind === 'bit' ? (v === 0 ? 0 : 1) : (v & 0xFFFF)
+  reg.changed = true
   editingCell.value = null
+}
+
+const subTabToFunctionCode = {
+  fc01: '01',
+  fc02: '02',
+  fc03: '03',
+  fc04: '04',
+  fc05: '05',
+  fc06: '06',
+  fc0f: '0F',
+  fc10: '10',
+  fc17: '17',
 }
 
 watch(
@@ -361,6 +543,17 @@ watch(
       stopAllPolling()
     }
   }
+)
+
+watch(
+  () => props.activeSubTab,
+  (subTab) => {
+    const mapped = subTabToFunctionCode[subTab]
+    if (!mapped) return
+    activeWindow.value.functionCode = mapped
+    applySettings()
+  },
+  { immediate: true }
 )
 
 onBeforeUnmount(() => {
@@ -416,7 +609,7 @@ onBeforeUnmount(() => {
 
       <div class="flex items-center gap-1.5">
         <span class="text-xs text-gray-500">{{ $t('register.functionCode') }}</span>
-        <el-select v-model="activeWindow.functionCode" size="small" class="w-40!">
+        <el-select v-model="activeWindow.functionCode" size="small" class="w-40!" @change="applySettings">
           <el-option
             v-for="fc in functionCodes"
             :key="fc.value"
@@ -442,14 +635,25 @@ onBeforeUnmount(() => {
         <span class="text-xs text-gray-500">{{ $t('register.quantity') }}</span>
         <el-input-number
           v-model="activeWindow.quantity"
-          :min="1" :max="125"
+          :min="1" :max="currentQuantityMax"
           size="small"
           controls-position="right"
           class="w-20!"
         />
       </div>
 
-      <div class="flex items-center gap-1.5">
+      <div v-if="isWriteReadMode" class="flex items-center gap-1.5">
+        <span class="text-xs text-gray-500">{{ $t('register.writeStartAddress') }}</span>
+        <el-input-number
+          v-model="activeWindow.writeStartAddress"
+          :min="0" :max="65535"
+          size="small"
+          controls-position="right"
+          class="w-24!"
+        />
+      </div>
+
+      <div v-if="isReadMode" class="flex items-center gap-1.5">
         <span class="text-xs text-gray-500">{{ $t('register.scanRate') }}</span>
         <el-input-number
           v-model="activeWindow.scanRate"
@@ -481,13 +685,14 @@ onBeforeUnmount(() => {
 
       <div class="flex items-center gap-1.5 ml-auto">
         <el-button size="small" @click="applySettings" :icon="Setting">{{ $t('register.apply') }}</el-button>
-        <el-button size="small" @click="readOnce" :icon="Refresh" :disabled="!canRead || activeWindow.loading" :loading="activeWindow.loading && !activeWindow.polling">{{ $t('register.readOnce') }}</el-button>
+        <el-button size="small" @click="executeActiveWindow" :icon="Refresh" :disabled="!canOperate || activeWindow.loading" :loading="activeWindow.loading && !activeWindow.polling">{{ actionLabel }}</el-button>
         <el-button
+          v-if="isReadMode"
           size="small"
           :type="activeWindow.polling ? 'danger' : 'primary'"
           @click="togglePolling(activeWindow)"
           :icon="activeWindow.polling ? VideoPause : VideoPlay"
-          :disabled="!canRead || activeWindow.loading"
+          :disabled="!canOperate || activeWindow.loading"
         >
           {{ activeWindow.polling ? $t('register.stop') : $t('register.poll') }}
         </el-button>
@@ -614,12 +819,13 @@ onBeforeUnmount(() => {
         <span>{{ $t('register.connection') }}: {{ connected ? connectionId : $t('register.noConnection') }}</span>
         <span>Slave: {{ currentSlaveId }}</span>
         <span>FC: {{ activeWindow.functionCode }}</span>
+        <span>{{ $t('register.mode') }}: {{ currentModeLabel }}</span>
         <span>{{ $t('register.address') }}: {{ activeWindow.startAddress }}–{{ activeWindow.startAddress + activeWindow.quantity - 1 }}</span>
         <span>{{ $t('register.quantity') }}: {{ activeWindow.quantity }}</span>
       </div>
       <div class="flex items-center gap-4">
         <span v-if="activeWindow.lastError" class="text-red-500">{{ activeWindow.lastError }}</span>
-        <span v-if="activeWindow.lastReadAt">{{ $t('register.lastRead') }}: {{ activeWindow.lastReadAt }}</span>
+        <span v-if="activeWindow.lastActionAt">{{ $t('register.lastAction') }}: {{ activeWindow.lastActionAt }}</span>
         <span v-if="activeWindow.polling" class="text-green-600">
           ● {{ $t('register.pollingStatus') }} ({{ activeWindow.scanRate }}ms)
         </span>
