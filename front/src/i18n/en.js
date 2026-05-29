@@ -118,4 +118,13 @@ export default {
     zh: '简体中文',
     en: 'English',
   },
+  traffic: {
+    title: 'Traffic Log',
+    description: 'Shows libmodbus raw request and response frames in near real time.',
+    refresh: 'Refresh',
+    clear: 'Clear',
+    empty: 'No raw frames yet. Read or write to populate this panel.',
+    send: 'Send',
+    recv: 'Recv',
+  },
 }

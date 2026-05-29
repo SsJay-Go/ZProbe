@@ -118,4 +118,13 @@ export default {
     zh: '简体中文',
     en: 'English',
   },
+  traffic: {
+    title: '通信日志',
+    description: '近实时显示 libmodbus 收发的原始报文帧，便于查看当前通信内容。',
+    refresh: '刷新',
+    clear: '清空',
+    empty: '当前还没有原始报文。执行读取或写入后会显示在这里。',
+    send: '发',
+    recv: '收',
+  },
 }

@@ -4,7 +4,6 @@ const connection_model = @import("../models/connection.zig");
 const model = @import("../models/modbus.zig");
 const service = @import("../services/modbus_service.zig");
 const controller_helpers = @import("./controller_helpers.zig");
-const std = @import("std");
 
 /// Modbus 读控制器。
 ///
@@ -20,7 +19,6 @@ pub fn readRegisters(app: *context.App, req: *httpz.Request, res: *httpz.Respons
     }
 
     const payload = maybe_payload.?;
-    std.debug.print("Received read request: {any}\n", .{payload});
     service.validateReadRequest(payload) catch |err| {
         controller_helpers.closeAfterResponse(res);
         res.setStatus(.bad_request);

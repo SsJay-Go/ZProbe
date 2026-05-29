@@ -1,4 +1,5 @@
 const std = @import("std");
+const traffic_log = @import("../services/traffic_log.zig");
 
 pub const c = @cImport({
     @cDefine("FD_SETSIZE", "1024");
@@ -6,6 +7,46 @@ pub const c = @cImport({
     @cInclude("modbus-rtu.h");
     @cInclude("modbus-tcp.h");
 });
+
+var trace_log: ?*traffic_log.TrafficLog = null;
+
+pub fn installTraceLog(log: *traffic_log.TrafficLog) void {
+    trace_log = log;
+    c.modbus_set_trace_hook(zprobeModbusTraceHook);
+}
+
+pub fn uninstallTraceLog() void {
+    trace_log = null;
+    c.modbus_set_trace_hook(null);
+}
+
+export fn zprobeModbusTraceHook(direction: c_int, backend_type: c_int, frame: [*c]const u8, frame_length: c_int) callconv(.c) void {
+    const log = trace_log orelse return;
+    if (frame == null or frame_length <= 0) return;
+
+    const trace_direction: traffic_log.Direction = if (direction == c.MODBUS_TRACE_SEND) .send else .recv;
+    const category = if (backend_type == 0) "rtu.frame" else "tcp.frame";
+
+    var buffer: [1536]u8 = undefined;
+    const bytes = frame[0..@intCast(frame_length)];
+    const rendered = renderFrameHex(&buffer, bytes) catch return;
+    log.append(category, trace_direction, rendered);
+}
+
+fn renderFrameHex(buffer: []u8, frame: []const u8) ![]const u8 {
+    var used: usize = 0;
+
+    for (frame, 0..) |byte, index| {
+        if (index != 0) {
+            buffer[used] = ' ';
+            used += 1;
+        }
+        const written = try std.fmt.bufPrint(buffer[used..], "{X:0>2}", .{byte});
+        used += written.len;
+    }
+
+    return buffer[0..used];
+}
 
 pub const ConnectError = error{
     OutOfMemory,

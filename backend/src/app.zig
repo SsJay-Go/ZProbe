@@ -3,6 +3,8 @@ const httpz = @import("httpz");
 const routes = @import("./routes/index.zig");
 const context = @import("./context.zig");
 const connection_pool = @import("./services/connection_pool.zig");
+const traffic_log = @import("./services/traffic_log.zig");
+const libmodbus = @import("./protocol_bindings/libmodbus.zig");
 
 const Cors = httpz.middleware.Cors;
 
@@ -17,10 +19,15 @@ pub fn run(init: std.process.Init) !void {
     // 所以 app 必须在 server.deinit() 之前保持有效（在同一作用域内声明即可）。
     var app = context.App{
         .pool = connection_pool.ConnectionPool.init(allocator),
+        .traffic_log = traffic_log.TrafficLog.init(allocator),
     };
     // defer 确保无论 run 函数如何退出（正常 return 或返回错误），
     // 都会释放连接池中所有连接及其关联内存，避免资源泄漏。
     defer app.pool.deinit();
+    defer app.traffic_log.deinit();
+
+    libmodbus.installTraceLog(&app.traffic_log);
+    defer libmodbus.uninstallTraceLog();
 
     // httpz.Server(*context.App)：
     //   将 *context.App 作为 Handler 类型参数。

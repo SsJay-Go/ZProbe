@@ -3,13 +3,12 @@ import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import {
-  ArrowDown, Monitor, Connection, Setting, DataLine, Document,
-  Edit, View, Tools, QuestionFilled, Link, Refresh, Search,
-  Histogram, List, Warning, Cpu,
+  ArrowDown, Connection, Link, Cpu, Document,
 } from '@element-plus/icons-vue'
 import RegisterView from '../views/RegisterView.vue'
 import TcpConnectionDialog from '../components/connection/TcpConnectionDialog.vue'
 import RtuConnectionDialog from '../components/connection/RtuConnectionDialog.vue'
+import TrafficLogPanel from '../components/display/TrafficLogPanel.vue'
 import { disconnectConnection } from '../api/connection'
 
 const { t, locale } = useI18n()
@@ -21,6 +20,7 @@ function switchLang(lang) {
 
 const activeTab = ref('connection')
 const activeSubTab = ref('new-tcp')
+const activeFunctionTab = ref('fc03')
 const tcpDialogVisible = ref(false)
 const rtuDialogVisible = ref(false)
 const isDisconnecting = ref(false)   // 断开中：禁用按钮，防止重复点击
@@ -50,85 +50,40 @@ const tabs = computed(() => {
         },
         // 已连接或断开中时禁用其他连接选项，防止同时建立多个异类连接。
         { name: 'new-rtu', label: t('nav.newRtu'), disabled: isConnected || isDisconnecting.value },
-        { name: 'new-ascii', label: t('nav.newAscii'), disabled: isConnected || isDisconnecting.value },
-        { divider: true },
-        { name: 'manager', label: t('nav.manager'), disabled: isConnected || isDisconnecting.value },
-        { name: 'scan-port', label: t('nav.scanPort'), disabled: isConnected || isDisconnecting.value },
       ]
     },
-  {
-    name: 'setup', label: t('nav.setup'), icon: Edit,
-    children: [
-      { name: 'new-read', label: t('nav.newRead') },
-      { name: 'new-write', label: t('nav.newWrite') },
-      { name: 'batch', label: t('nav.batch') },
-      { divider: true },
-      { name: 'import-export', label: t('nav.importExport') },
-    ]
-  },
-  {
-    name: 'functions', label: t('nav.functions'), icon: Cpu,
-    children: [
-      { name: 'fc01', label: t('nav.fc01') },
-      { name: 'fc02', label: t('nav.fc02') },
-      { name: 'fc03', label: t('nav.fc03') },
-      { name: 'fc04', label: t('nav.fc04') },
-      { divider: true },
-      { name: 'fc05', label: t('nav.fc05') },
-      { name: 'fc06', label: t('nav.fc06') },
-      { name: 'fc0f', label: t('nav.fc0f') },
-      { name: 'fc10', label: t('nav.fc10') },
-      { name: 'fc17', label: t('nav.fc17') },
-      { divider: true },
-      { name: 'custom-frame', label: t('nav.customFrame') },
-    ]
-  },
-  {
-    name: 'display', label: t('nav.display'), icon: View,
-    children: [
-      { name: 'format', label: t('nav.format') },
-      { name: 'endian', label: t('nav.endian') },
-      { name: 'table-view', label: t('nav.tableView') },
-      { name: 'map-view', label: t('nav.mapView') },
-      { name: 'highlight', label: t('nav.highlight') },
-    ]
-  },
-  {
-    name: 'monitor', label: t('nav.monitor'), icon: Monitor,
-    children: [
-      { name: 'polling', label: t('nav.polling') },
-      { name: 'chart', label: t('nav.chart') },
-      { name: 'record', label: t('nav.record') },
-      { divider: true },
-      { name: 'traffic', label: t('nav.traffic') },
-      { name: 'error-stats', label: t('nav.errorStats') },
-    ]
-  },
-  {
-    name: 'tools', label: t('nav.tools'), icon: Tools,
-    children: [
-      { name: 'crc-calc', label: t('nav.crcCalc') },
-      { name: 'addr-convert', label: t('nav.addrConvert') },
-      { name: 'data-convert', label: t('nav.dataConvert') },
-      { divider: true },
-      { name: 'slave-sim', label: t('nav.slaveSim') },
-      { name: 'stress-test', label: t('nav.stressTest') },
-    ]
-  },
-  {
-    name: 'help', label: t('nav.help'), icon: QuestionFilled,
-    children: [
-      { name: 'protocol-ref', label: t('nav.protocolRef') },
-      { name: 'shortcuts', label: t('nav.shortcuts') },
-      { name: 'about', label: t('nav.about') },
-    ]
-  },
-]})
+    {
+      name: 'functions', label: t('nav.functions'), icon: Cpu,
+      children: [
+        { name: 'fc01', label: t('nav.fc01') },
+        { name: 'fc02', label: t('nav.fc02') },
+        { name: 'fc03', label: t('nav.fc03') },
+        { name: 'fc04', label: t('nav.fc04') },
+        { divider: true },
+        { name: 'fc05', label: t('nav.fc05') },
+        { name: 'fc06', label: t('nav.fc06') },
+        { name: 'fc0f', label: t('nav.fc0f') },
+        { name: 'fc10', label: t('nav.fc10') },
+        { name: 'fc17', label: t('nav.fc17') },
+      ]
+    },
+    {
+      name: 'display', label: t('nav.display'), icon: Document,
+      children: [
+        { name: 'traffic', label: t('nav.traffic') },
+      ]
+    },
+  ]
+})
 
 function handleTabCommand(command) {
   const [tab, sub] = command.split('/')
   activeTab.value = tab
   activeSubTab.value = sub
+
+  if (tab === 'functions') {
+    activeFunctionTab.value = sub
+  }
 
   // 已连接时点击"断开 TCP"→ 发送断开请求；断开中时忽略点击；未连接时→ 打开对话框。
   if (tab === 'connection' && sub === 'new-tcp') {
@@ -147,15 +102,15 @@ function handleTabCommand(command) {
     return
   }
 
-  if (tab === 'connection' && sub === 'new-ascii') {
-    ElMessage.warning(t('nav.asciiUnsupported'))
-  }
 }
 
 function handleTabClick(tab) {
   activeTab.value = tab.name
   const firstReal = tab.children.find(c => !c.divider)
-  if (firstReal) activeSubTab.value = firstReal.name
+  if (firstReal) {
+    activeSubTab.value = firstReal.name
+    if (tab.name === 'functions') activeFunctionTab.value = firstReal.name
+  }
 }
 
 const currentTab = computed(() => tabs.find(t => t.name === activeTab.value))
@@ -165,6 +120,8 @@ const currentSubLabel = computed(() => {
   const child = tab.children.find(c => c.name === activeSubTab.value)
   return child?.label || ''
 })
+
+const trafficPanelVisible = computed(() => activeTab.value === 'display' && activeSubTab.value === 'traffic')
 
 function handleTcpConnected(payload) {
   const connection = payload?.connection || {}
@@ -280,14 +237,19 @@ async function handleDisconnect() {
 
     <!-- 主内容区 -->
     <el-main class="bg-gray-50 p-0! overflow-hidden">
-      <RegisterView
-        :connected="connectionState.connected"
-        :connection-id="connectionState.connectionId"
-        :transport="connectionState.transport"
-        :slave-id="connectionState.slaveId"
-        :timeout-ms="connectionState.timeoutMs"
-        :active-sub-tab="activeSubTab"
-      />
+      <div class="flex h-full flex-col">
+        <div class="min-h-0 flex-1 overflow-hidden">
+          <RegisterView
+            :connected="connectionState.connected"
+            :connection-id="connectionState.connectionId"
+            :transport="connectionState.transport"
+            :slave-id="connectionState.slaveId"
+            :timeout-ms="connectionState.timeoutMs"
+            :active-sub-tab="activeFunctionTab"
+          />
+        </div>
+        <TrafficLogPanel :visible="trafficPanelVisible" />
+      </div>
     </el-main>
 
     <TcpConnectionDialog

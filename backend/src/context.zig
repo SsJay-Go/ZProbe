@@ -1,4 +1,7 @@
 const connection_pool = @import("services/connection_pool.zig");
+const traffic_log = @import("services/traffic_log.zig");
+const web_assets = @import("services/web_assets.zig");
+const httpz = @import("httpz");
 
 /// 应用级共享上下文（httpz Handler 类型）。
 ///
@@ -22,4 +25,9 @@ pub const App = struct {
     /// 但字段类型已经不再绑定到某一个 transport，后续可以平滑接入 RTU / ASCII。
     /// 在 app.zig 中初始化，由 httpz 框架注入到每个请求处理函数中。
     pool: connection_pool.ConnectionPool,
+    traffic_log: traffic_log.TrafficLog,
+
+    pub fn notFound(_: *App, req: *httpz.Request, res: *httpz.Response) !void {
+        return web_assets.serveDist(req, res);
+    }
 };

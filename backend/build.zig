@@ -66,6 +66,11 @@ pub fn build(b: *std.Build) void {
 
     // 把可执行文件挂到默认安装步骤，执行 `zig build` 时会输出到 zig-out。
     b.installArtifact(exe);
+    b.installDirectory(.{
+        .source_dir = b.path("../front/dist"),
+        .install_dir = .prefix,
+        .install_subdir = "dist",
+    });
 
     // 定义顶层 run 步骤，允许通过 `zig build run` 直接启动程序。
     const run_step = b.step("run", "Run the app");
