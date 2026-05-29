@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { ElMessage } from 'element-plus'
 import {
@@ -9,9 +9,21 @@ import RegisterView from '../views/RegisterView.vue'
 import TcpConnectionDialog from '../components/connection/TcpConnectionDialog.vue'
 import RtuConnectionDialog from '../components/connection/RtuConnectionDialog.vue'
 import TrafficLogPanel from '../components/display/TrafficLogPanel.vue'
-import { disconnectConnection } from '../api/connection'
+import { disconnectConnection, fetchConnectionState } from '../api/connection'
 
 const { t, locale } = useI18n()
+const CONNECTION_STORAGE_KEY = 'zprobe-active-connection'
+
+function createEmptyConnectionState() {
+  return {
+    connected: false,
+    name: '',
+    connectionId: '',
+    transport: '',
+    slaveId: 1,
+    timeoutMs: 10000,
+  }
+}
 
 function switchLang(lang) {
   locale.value = lang
@@ -24,14 +36,7 @@ const activeFunctionTab = ref('fc03')
 const tcpDialogVisible = ref(false)
 const rtuDialogVisible = ref(false)
 const isDisconnecting = ref(false)   // 断开中：禁用按钮，防止重复点击
-const connectionState = ref({
-  connected: false,
-  name: '',
-  connectionId: '',   // 后端返回的连接 ID，断开时需要带上
-  transport: '',
-  slaveId: 1,
-  timeoutMs: 10000,
-})
+const connectionState = ref(createEmptyConnectionState())
 
 const tabs = computed(() => {
   const isConnected = connectionState.value.connected
@@ -123,6 +128,47 @@ const currentSubLabel = computed(() => {
 
 const trafficPanelVisible = computed(() => activeTab.value === 'display' && activeSubTab.value === 'traffic')
 
+function saveConnectionState() {
+  localStorage.setItem(CONNECTION_STORAGE_KEY, JSON.stringify(connectionState.value))
+}
+
+function clearConnectionState() {
+  connectionState.value = createEmptyConnectionState()
+  localStorage.removeItem(CONNECTION_STORAGE_KEY)
+}
+
+async function restoreConnectionState() {
+  const raw = localStorage.getItem(CONNECTION_STORAGE_KEY)
+  if (!raw) return
+
+  try {
+    const saved = JSON.parse(raw)
+    if (!saved?.connectionId) {
+      clearConnectionState()
+      return
+    }
+
+    const response = await fetchConnectionState(saved.connectionId)
+    const connection = response?.connection
+    if (!response?.connected || !connection) {
+      clearConnectionState()
+      return
+    }
+
+    connectionState.value = {
+      connected: true,
+      name: connection.name || saved.name || 'Modbus',
+      connectionId: connection.id || saved.connectionId,
+      transport: connection.transport || saved.transport || '',
+      slaveId: connection.slaveId ?? saved.slaveId ?? 1,
+      timeoutMs: connection.timeoutMs ?? saved.timeoutMs ?? 10000,
+    }
+    saveConnectionState()
+  } catch {
+    clearConnectionState()
+  }
+}
+
 function handleTcpConnected(payload) {
   const connection = payload?.connection || {}
   connectionState.value = {
@@ -133,6 +179,7 @@ function handleTcpConnected(payload) {
     slaveId: connection.slaveId ?? 1,
     timeoutMs: connection.timeoutMs ?? 10000,
   }
+  saveConnectionState()
   ElMessage.success(`已连接: ${connectionState.value.name}`)
 }
 
@@ -147,7 +194,7 @@ async function handleDisconnect() {
   try {
     const res = await disconnectConnection(connectionId)
     if (!res?.success) throw new Error(res?.message || '断开失败')
-    connectionState.value = { connected: false, name: '', connectionId: '', transport: '', slaveId: 1, timeoutMs: 10000 }
+    clearConnectionState()
     ElMessage.success(`已断开: ${name}`)
   } catch (e) {
     ElMessage.error(e.message || '断开请求失败，请重试')
@@ -155,6 +202,10 @@ async function handleDisconnect() {
     isDisconnecting.value = false
   }
 }
+
+onMounted(() => {
+  void restoreConnectionState()
+})
 </script>
 
 <template>

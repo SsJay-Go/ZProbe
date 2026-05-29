@@ -93,6 +93,12 @@ pub const ConnectSuccessResponse = struct {
     connection: ConnectionInfo,
 };
 
+pub const ConnectionStatusResponse = struct {
+    success: bool,
+    connected: bool,
+    connection: ?ConnectionInfo = null,
+};
+
 /// 统一的 API 失败响应模型。
 pub const ErrorResponse = struct {
     success: bool,
@@ -145,6 +151,14 @@ pub fn makeConnectSuccess(connection: ConnectionInfo) ConnectSuccessResponse {
     return .{
         .success = true,
         .message = "连接已建立",
+        .connection = connection,
+    };
+}
+
+pub fn makeConnectionStatus(connection: ?ConnectionInfo) ConnectionStatusResponse {
+    return .{
+        .success = true,
+        .connected = connection != null,
         .connection = connection,
     };
 }

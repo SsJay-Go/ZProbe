@@ -47,3 +47,7 @@ export function disconnectConnection(connectionId) {
     connectionId,
   })
 }
+
+export function fetchConnectionState(connectionId) {
+  return request.get(`/connection/state/${encodeURIComponent(connectionId)}`)
+}

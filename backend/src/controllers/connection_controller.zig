@@ -136,3 +136,16 @@ pub fn disconnect(app: *context.App, req: *httpz.Request, res: *httpz.Response) 
     controller_helpers.closeAfterResponse(res);
     try res.json(.{ .success = true, .message = "连接已断开" }, .{});
 }
+
+pub fn status(app: *context.App, req: *httpz.Request, res: *httpz.Response) !void {
+    const connection_id = req.param("id") orelse {
+        controller_helpers.closeAfterResponse(res);
+        res.setStatus(.bad_request);
+        try res.json(model.makeError("connectionId 不能为空"), .{});
+        return;
+    };
+
+    const connection = if (app.pool.get(connection_id)) |record| record.info() else null;
+    controller_helpers.closeAfterResponse(res);
+    try res.json(model.makeConnectionStatus(connection), .{});
+}

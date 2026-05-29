@@ -6,4 +6,5 @@ const route_helpers = @import("./route_helpers.zig");
 pub fn register(router: anytype) void {
     route_helpers.registerPostWithPreflight(router, "/api/connection/connect", connection_controller.connect);
     route_helpers.registerPostWithPreflight(router, "/api/connection/disconnect", connection_controller.disconnect);
+    router.get("/api/connection/state/:id", connection_controller.status, .{});
 }
