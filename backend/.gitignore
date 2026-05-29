@@ -34,7 +34,7 @@ pnpm-debug.log*
 zig-cache/
 .zig-cache/
 zig-out/
-# zig-pkg/
+zig-pkg/
 *.zig.cache
 
 # Compiled objects
